@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Profil saqlandi{% endblock %}
+{% block content %}
+<section class="hero-card compact">
+  <p class="eyebrow">Muvaffaqiyatli</p>
+  <h1>Ma'lumotlar saqlandi</h1>
+  <p class="lead">Botga qayting. Asosiy menyuda referral, test va natijalar bo'limlari ishlaydi.</p>
+  <div class="actions">
+    <a class="primary-btn" href="/app/tests?token={{ token }}">Testlar</a>
+    <a class="ghost-btn" href="/app/results?token={{ token }}">Natijalar</a>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Materiallar{% endblock %}
+{% block content %}
+<section class="hero-card compact">
+  <p class="eyebrow">Materiallar</p>
+  <h1>Nizom va kitoblar</h1>
+</section>
+
+<section class="card">
+  <h2>Tanlov nizomi</h2>
+  {% for rule in rules %}
+  <article class="material-item">
+    <h3>{{ rule.title }}</h3>
+    <p>{{ rule.content }}</p>
+  </article>
+  {% else %}
+  <p>Nizom joylanmagan.</p>
+  {% endfor %}
+</section>
+
+<section class="card">
+  <h2>Tanlov kitoblari</h2>
+  {% for book in books %}
+  <article class="material-item">
+    <h3>{{ book.title }}</h3>
+    <p>{{ book.content }}</p>
+  </article>
+  {% else %}
+  <p>Kitoblar joylanmagan.</p>
+  {% endfor %}
+</section>
+{% endblock %}

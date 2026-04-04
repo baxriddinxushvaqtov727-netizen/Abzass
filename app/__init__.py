@@ -1,0 +1,1 @@
+"""Contest bot application package."""

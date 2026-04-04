@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Testlar{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <p class="eyebrow">Test markazi</p>
+  <h1>Testda qatnashish</h1>
+  <p class="lead">Testni ochish uchun kerakli takliflar soni bajarilgan bo'lishi kerak.</p>
+</section>
+
+<section class="stats-row">
+  <div class="stat-card">
+    <span>Taklif qilganlar</span>
+    <strong>{{ user.invited_users_count }}</strong>
+  </div>
+  <div class="stat-card">
+    <span>Jami ball</span>
+    <strong>{{ user.referral_score }}</strong>
+  </div>
+  <div class="stat-card">
+    <span>Kerakli minimum</span>
+    <strong>{{ required_referrals }}</strong>
+  </div>
+</section>
+
+<section class="card">
+  {% if error == "notfound" %}
+  <div class="notice-card warning">Test ID topilmadi yoki test allaqachon yopilgan.</div>
+  {% elif error == "referrals" %}
+  <div class="notice-card warning">Mazkur test uchun referral sharti bajarilmagan.</div>
+  {% endif %}
+  {% if can_take %}
+  <form method="post" action="/app/tests/start" class="stack-form">
+    <input type="hidden" name="token" value="{{ token }}">
+    <label>
+      <span>Test ID</span>
+      <input type="text" name="test_code" placeholder="Masalan: TEST-01" required>
+    </label>
+    <button class="primary-btn" type="submit">Testni boshlash</button>
+  </form>
+  {% else %}
+  <div class="notice-card warning">
+    Kamida {{ required_referrals }} ta foydalanuvchi taklif qilganingizdan keyin test oynasi ishlaydi.
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Faol testlar</h2>
+  <div class="test-list">
+    {% for test in tests %}
+    <article class="test-item">
+      <div>
+        <h3>{{ test.title }}</h3>
+        <p>{{ test.description or "Test tavsifi kiritilmagan." }}</p>
+        <p>Kerakli referral: {{ test.min_referrals }}</p>
+        {% if test.scheduled_end_at %}
+        <p>Tugash vaqti: {{ test.scheduled_end_at.strftime("%Y-%m-%d %H:%M") }}</p>
+        {% endif %}
+      </div>
+      <span class="pill">{{ test.test_code }}</span>
+    </article>
+    {% else %}
+    <p>Hozircha testlar mavjud emas.</p>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

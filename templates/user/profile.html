@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Profil{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <p class="eyebrow">Ro'yxatdan o'tish</p>
+  <h1>Ishtirokchi profili</h1>
+  <p class="lead">Barcha ma'lumotlar Telegram ID ga bog'lanadi. Profil to'liq bo'lsa referral va testlar ishlaydi.</p>
+</section>
+
+<section class="card">
+  <form method="post" action="/app/profile" class="grid-form" data-profile-form>
+    <input type="hidden" name="token" value="{{ token }}">
+    <label>
+      <span>Ism</span>
+      <input type="text" name="first_name" value="{{ profile.first_name if profile else '' }}" required>
+    </label>
+    <label>
+      <span>Familiya</span>
+      <input type="text" name="last_name" value="{{ profile.last_name if profile else '' }}" required>
+    </label>
+    <label>
+      <span>Otasining ismi</span>
+      <input type="text" name="patronymic" value="{{ profile.patronymic if profile else '' }}" required>
+    </label>
+    <label>
+      <span>Viloyat</span>
+      <select name="region" id="region-select" required>
+        <option value="">Tanlang</option>
+        {% for region_name in REGIONS.keys() %}
+        <option value="{{ region_name }}" {% if profile and profile.region == region_name %}selected{% endif %}>{{ region_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Sinf</span>
+      <select name="school_class" required>
+        <option value="">Tanlang</option>
+        {% for class_no in range(1, 12) %}
+        <option value="{{ class_no }}" {% if profile and profile.school_class == class_no %}selected{% endif %}>{{ class_no }}-sinf</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Til</span>
+      <select name="language" required>
+        {% for lang_code, lang_name in languages.items() %}
+        <option value="{{ lang_code }}" {% if user.language == lang_code %}selected{% endif %}>{{ lang_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="primary-btn" type="submit">Saqlash</button>
+  </form>
+</section>
+{% endblock %}

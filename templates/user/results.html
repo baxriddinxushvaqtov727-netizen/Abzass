@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Natijalar{% endblock %}
+{% block content %}
+<section class="hero-card compact">
+  <p class="eyebrow">Natijalar</p>
+  <h1>Test yakunlari</h1>
+  <p class="lead">Admin testni yopgach bot orqali javoblaringizning to'g'ri yoki xatoligi yuboriladi.</p>
+</section>
+
+<section class="stats-row">
+  <div class="stat-card">
+    <span>Test ball</span>
+    <strong>{{ test_score }}</strong>
+  </div>
+  <div class="stat-card">
+    <span>Referral ball</span>
+    <strong>{{ referral_score }}</strong>
+  </div>
+  <div class="stat-card">
+    <span>Jami ochko</span>
+    <strong>{{ total_score }}</strong>
+  </div>
+  <div class="stat-card">
+    <span>Sizning o'rningiz</span>
+    <strong>{{ my_rank.rank if my_rank else "-" }}</strong>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Top 50</h2>
+  <div class="stack-list">
+    {% for row in top_50 %}
+    <article class="list-row {% if my_rank and row.user_id == my_rank.user_id %}highlight-row{% endif %}">
+      <div>
+        <h3>{{ row.rank }}. {{ row.display_name }}</h3>
+        <p>Test: {{ row.test_score }} | Referral: {{ row.referral_score }}</p>
+      </div>
+      <strong>{{ row.total_score }}</strong>
+    </article>
+    {% else %}
+    <p>Reyting hali shakllanmagan.</p>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>Mening testlarim</h2>
+  {% for attempt in attempts %}
+  <article class="result-item">
+    <div>
+      <h2>{{ attempt.test.title }}</h2>
+      <p>Status: {{ attempt.status }}</p>
+    </div>
+    <strong>{{ attempt.score }}/{{ attempt.total_questions }}</strong>
+  </article>
+  {% else %}
+  <p>Hozircha natijalar mavjud emas.</p>
+  {% endfor %}
+</section>
+{% endblock %}

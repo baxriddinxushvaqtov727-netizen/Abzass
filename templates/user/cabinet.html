@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Shaxsiy kabinet{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <p class="eyebrow">Kabinet</p>
+  <h1>{{ profile.first_name if profile else user.telegram_first_name or "Ishtirokchi" }}</h1>
+  <p class="lead">Profil, referral ko'rsatkichlari, umumiy ball va test tarixi bitta sahifada.</p>
+</section>
+
+<section class="stats-row">
+  <div class="stat-card">
+    <span>Taklif qilganlar</span>
+    <strong>{{ user.invited_users_count }}</strong>
+  </div>
+  <div class="stat-card">
+    <span>Referral ball</span>
+    <strong>{{ user.referral_score }}</strong>
+  </div>
+  <div class="stat-card">
+    <span>Test ball</span>
+    <strong>{{ test_score }}</strong>
+  </div>
+  <div class="stat-card">
+    <span>Jami ball</span>
+    <strong>{{ total_score }}</strong>
+  </div>
+</section>
+
+<section class="dashboard-grid">
+  <div class="card">
+    <h2>Profil</h2>
+    <div class="stack-list">
+      <div><strong>Telefon:</strong> {{ user.phone_number or "-" }}</div>
+      <div><strong>Viloyat:</strong> {{ profile.region if profile else "-" }}</div>
+      <div><strong>Sinf:</strong> {{ profile.school_class if profile else "-" }}</div>
+      <div><strong>O'rin:</strong> {{ my_rank.rank if my_rank else "-" }}</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Til</h2>
+    <form method="post" action="/app/cabinet/language" class="stack-form">
+      <input type="hidden" name="token" value="{{ token }}">
+      <select name="language" required>
+        {% for lang_code, lang_name in languages.items() %}
+        <option value="{{ lang_code }}" {% if user.language == lang_code %}selected{% endif %}>{{ lang_name }}</option>
+        {% endfor %}
+      </select>
+      <button class="primary-btn" type="submit">Tilni saqlash</button>
+    </form>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Testlar tarixi</h2>
+  <div class="stack-list">
+    {% for attempt in attempts %}
+    <article class="list-row">
+      <div>
+        <h3>{{ attempt.test.title }}</h3>
+        <p>{{ attempt.completed_at.strftime("%Y-%m-%d %H:%M") if attempt.completed_at else "Jarayonda" }}</p>
+      </div>
+      <strong>{{ attempt.score }}/{{ attempt.total_questions }}</strong>
+    </article>
+    {% else %}
+    <p>Hali test ishlanmagan.</p>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

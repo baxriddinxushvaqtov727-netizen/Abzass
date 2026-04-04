@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Test ishlash{% endblock %}
+{% block content %}
+<section class="hero-card compact">
+  <p class="eyebrow">Test</p>
+  <h1>{{ attempt.test.title }}</h1>
+  <p class="lead">{{ attempt.test.description or "Savollarga bir martada javob bering." }}</p>
+</section>
+
+<form method="post" action="/app/tests/{{ attempt.id }}/submit" class="question-stack">
+  <input type="hidden" name="token" value="{{ token }}">
+  {% for question in attempt.test.questions %}
+  <section class="card question-card">
+    <div class="question-head">
+      <span class="pill">Savol {{ loop.index }}</span>
+      <h2>{{ question.text or ("Savol " ~ loop.index) }}</h2>
+    </div>
+    <div class="options-grid">
+      {% for option in question.options %}
+      <label class="option-card">
+        <input type="radio" name="question_{{ question.id }}" value="{{ option.id }}" required>
+        <span>{{ option.text }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+  <button class="primary-btn wide" type="submit">Testni yakunlash</button>
+</form>
+{% endblock %}
