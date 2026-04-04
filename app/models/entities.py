@@ -52,6 +52,7 @@ class UserProfile(TimestampMixin, Base):
     last_name: Mapped[str] = mapped_column(String(255))
     patronymic: Mapped[str] = mapped_column(String(255))
     region: Mapped[str] = mapped_column(String(255))
+    district: Mapped[str] = mapped_column(String(255))
     school_class: Mapped[int] = mapped_column(Integer)
 
     user: Mapped["User"] = relationship(back_populates="profile")
@@ -95,7 +96,9 @@ class Test(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(255))
     test_code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    answer_key: Mapped[str] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_telegram_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     min_referrals: Mapped[int] = mapped_column(Integer, default=3)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     scheduled_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -183,3 +186,10 @@ class ScheduledBroadcast(TimestampMixin, Base):
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     is_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BotConfig(TimestampMixin, Base):
+    __tablename__ = "bot_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    referral_share_text: Mapped[str | None] = mapped_column(Text, nullable=True)

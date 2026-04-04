@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 from app.bot.launcher import create_bot, create_dispatcher
 from app.core.config import get_settings
@@ -61,6 +60,4 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/uploads", StaticFiles(directory=settings.upload_dir, check_dir=False), name="uploads")
 register_routes(app)

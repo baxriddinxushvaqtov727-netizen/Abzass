@@ -3,9 +3,9 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    WebAppInfo,
 )
 
+from app.core.constants import REGIONS
 from app.core.i18n import menu_texts, t
 
 
@@ -36,13 +36,6 @@ def main_menu_keyboard(language: str) -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton(text=button)] for button in menu_texts(language).values()]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
-
-def webapp_inline_button(text: str, url: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=text, web_app=WebAppInfo(url=url))]]
-    )
-
-
 def admin_ticket_actions(ticket_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -65,6 +58,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Nizom/Kitob", callback_data="admin:content"),
                 InlineKeyboardButton(text="Broadcast", callback_data="admin:broadcast"),
             ],
+            [InlineKeyboardButton(text="Referral izohi", callback_data="admin:referral_text")],
             [InlineKeyboardButton(text="Yangilash", callback_data="admin:home")],
         ]
     )
@@ -133,4 +127,36 @@ def admin_broadcast_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Orqaga", callback_data="admin:home"),
             ],
         ]
+    )
+
+
+def regions_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    current_row: list[InlineKeyboardButton] = []
+    for region in REGIONS.keys():
+        current_row.append(InlineKeyboardButton(text=region, callback_data=f"reg_region:{region}"))
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def classes_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    current_row: list[InlineKeyboardButton] = []
+    for class_no in range(1, 12):
+        current_row.append(InlineKeyboardButton(text=str(class_no), callback_data=f"reg_class:{class_no}"))
+        if len(current_row) == 4:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def referral_share_keyboard(share_url: str, button_text: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=button_text, url=share_url)]]
     )

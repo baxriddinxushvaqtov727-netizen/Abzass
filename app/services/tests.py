@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import re
 from datetime import datetime, timezone
 
 from aiogram import Bot
@@ -12,8 +12,28 @@ from app.core.constants import MIN_REFERRALS_FOR_TEST
 from app.models import AttemptStatus, Question, QuestionOption, Test, TestAnswer, TestAttempt, User, UserProfile
 
 
+ANSWER_PATTERN = re.compile(r"[A-Da-d]")
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def normalize_answer_key(raw_value: str) -> list[str]:
+    answers = [item.upper() for item in ANSWER_PATTERN.findall(raw_value or "")]
+    if not answers:
+        raise ValueError("Javob kaliti bo'sh. Faqat A, B, C, D harflaridan foydalaning.")
+    return answers
+
+
+def parse_submission_text(raw_value: str) -> tuple[str, list[str]]:
+    if "*" not in raw_value:
+        raise ValueError("Format: 1234*ABCDA yoki 1234*1a2b3c")
+    test_code, answer_part = raw_value.split("*", 1)
+    normalized_code = test_code.strip().upper()
+    if not normalized_code:
+        raise ValueError("Test ID kiritilmagan.")
+    return normalized_code, normalize_answer_key(answer_part)
 
 
 def is_test_open(test: Test) -> bool:
@@ -37,8 +57,7 @@ async def get_active_tests(session: AsyncSession) -> list[Test]:
 
 
 async def get_all_tests(session: AsyncSession) -> list[Test]:
-    stmt = select(Test).order_by(Test.id.desc())
-    result = await session.scalars(stmt)
+    result = await session.scalars(select(Test).order_by(Test.id.desc()))
     return list(result.all())
 
 
@@ -142,31 +161,17 @@ async def submit_attempt(session: AsyncSession, attempt: TestAttempt, answers: d
     return await get_attempt(session, attempt.id)  # type: ignore[return-value]
 
 
-def parse_questions_payload(raw_payload: str) -> list[dict]:
-    data = json.loads(raw_payload)
-    if not isinstance(data, list) or not data:
-        raise ValueError("Savollar ro'yxati bo'sh bo'lishi mumkin emas.")
+async def submit_attempt_by_letters(session: AsyncSession, attempt: TestAttempt, answers: list[str]) -> TestAttempt:
+    if len(answers) != len(attempt.test.questions):
+        raise ValueError(f"Javoblar soni {len(attempt.test.questions)} ta bo'lishi kerak.")
 
-    parsed: list[dict] = []
-    for index, item in enumerate(data):
-        text = str(item.get("text", "")).strip()
-        options = item.get("options", [])
-        correct = int(item.get("correct_index", -1))
-        if not isinstance(options, list) or len(options) != 4:
-            raise ValueError(f"{index + 1}-savolda 4 ta variant bo'lishi kerak.")
-        cleaned_options = [str(option).strip() for option in options]
-        if any(not option for option in cleaned_options):
-            raise ValueError(f"{index + 1}-savol variantlari to'liq to'ldirilmagan.")
-        if correct not in {0, 1, 2, 3}:
-            raise ValueError(f"{index + 1}-savolda to'g'ri javob ko'rsatilmagan.")
-        parsed.append(
-            {
-                "text": text or f"Savol {index + 1}",
-                "options": cleaned_options,
-                "correct_index": correct,
-            }
-        )
-    return parsed
+    option_map: dict[int, int] = {}
+    for question, letter in zip(attempt.test.questions, answers, strict=False):
+        selected = next((option for option in question.options if option.text.upper() == letter), None)
+        if selected is None:
+            raise ValueError(f"{question.order_index + 1}-savol uchun javob topilmadi.")
+        option_map[question.id] = selected.id
+    return await submit_attempt(session, attempt, option_map)
 
 
 async def create_test(
@@ -174,37 +179,42 @@ async def create_test(
     *,
     title: str,
     test_code: str,
-    description: str | None,
+    answer_key: str,
     min_referrals: int,
-    questions_payload: str,
+    created_by_telegram_id: int | None = None,
+    description: str | None = None,
     scheduled_end_at: datetime | None = None,
 ) -> Test:
-    questions = parse_questions_payload(questions_payload)
+    normalized_answers = normalize_answer_key(answer_key)
+    normalized_key = "".join(normalized_answers)
+
     test = Test(
         title=title.strip(),
         test_code=test_code.strip().upper(),
+        answer_key=normalized_key,
         description=(description or "").strip() or None,
         min_referrals=min_referrals,
+        created_by_telegram_id=created_by_telegram_id,
         scheduled_end_at=scheduled_end_at,
         is_active=True,
     )
     session.add(test)
     await session.flush()
 
-    for idx, question_payload in enumerate(questions):
+    for idx, correct_answer in enumerate(normalized_answers):
         question = Question(
             test_id=test.id,
-            text=question_payload["text"],
+            text=f"Savol {idx + 1}",
             order_index=idx,
         )
         session.add(question)
         await session.flush()
-        for option_idx, option_text in enumerate(question_payload["options"]):
+        for letter in ["A", "B", "C", "D"]:
             session.add(
                 QuestionOption(
                     question_id=question.id,
-                    text=option_text,
-                    is_correct=option_idx == question_payload["correct_index"],
+                    text=letter,
+                    is_correct=letter == correct_answer,
                 )
             )
 
@@ -221,6 +231,7 @@ def build_attempt_review(attempt: TestAttempt) -> str:
     lines = [
         f"Ishtirokchi: {user_name}",
         f"Test: {attempt.test.title}",
+        f"Test ID: {attempt.test.test_code}",
         f"Natija: {attempt.score}/{attempt.total_questions}",
         "",
     ]
@@ -232,7 +243,7 @@ def build_attempt_review(attempt: TestAttempt) -> str:
         status = "To'g'ri" if answer and answer.is_correct else "Noto'g'ri"
         lines.extend(
             [
-                f"{index}. {question.text}",
+                f"{index}-savol",
                 f"Siz belgilagan javob: {chosen}",
                 f"To'g'ri javob: {correct}",
                 f"Holat: {status}",

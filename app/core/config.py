@@ -10,9 +10,7 @@ class Settings(BaseSettings):
     app_name: str = "Contest Bot Platform"
     bot_token: str = Field(alias="BOT_TOKEN")
     bot_username: str = Field(alias="BOT_USERNAME")
-    web_app_base_url: str = Field(alias="WEB_APP_BASE_URL")
     database_url: str = Field(default="sqlite+aiosqlite:///./app.db", alias="DATABASE_URL")
-    secret_key: str = Field(alias="SECRET_KEY")
     admin_ids: str = Field(default="", alias="ADMIN_IDS")
     run_bot: bool = Field(default=True, alias="RUN_BOT")
     app_timezone: str = Field(default="Asia/Samarkand", alias="APP_TIMEZONE")
@@ -21,10 +19,6 @@ class Settings(BaseSettings):
     @property
     def admin_id_list(self) -> list[int]:
         return [int(item.strip()) for item in self.admin_ids.split(",") if item.strip()]
-
-    @property
-    def normalized_web_app_base_url(self) -> str:
-        return self.web_app_base_url.rstrip("/")
 
 
 @lru_cache(maxsize=1)

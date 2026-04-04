@@ -6,16 +6,25 @@ class SupportStates(StatesGroup):
     waiting_for_admin_reply = State()
 
 
+class RegistrationStates(StatesGroup):
+    waiting_for_first_name = State()
+    waiting_for_last_name = State()
+    waiting_for_patronymic = State()
+    waiting_for_region = State()
+    waiting_for_district = State()
+    waiting_for_school_class = State()
+
+
 class AdminStates(StatesGroup):
     waiting_for_channel_create = State()
     waiting_for_channel_delete = State()
+    waiting_for_referral_text = State()
 
     waiting_for_test_title = State()
     waiting_for_test_code = State()
-    waiting_for_test_description = State()
     waiting_for_test_min_referrals = State()
     waiting_for_test_end_at = State()
-    waiting_for_test_questions = State()
+    waiting_for_test_answer_key = State()
     waiting_for_test_close = State()
     waiting_for_test_delete = State()
 

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -18,6 +18,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.bot.keyboards import (
     admin_broadcast_keyboard,
@@ -26,56 +27,49 @@ from app.bot.keyboards import (
     admin_panel_keyboard,
     admin_ticket_actions,
     admin_tests_keyboard,
+    classes_keyboard,
     main_menu_keyboard,
     phone_keyboard,
+    referral_share_keyboard,
+    regions_keyboard,
     required_channels_keyboard,
-    webapp_inline_button,
 )
-from app.bot.states import AdminStates, SupportStates
+from app.bot.states import AdminStates, RegistrationStates, SupportStates
 from app.core.config import get_settings
 from app.core.constants import MIN_REFERRALS_FOR_TEST
 from app.core.i18n import resolve_menu_key, t
-from app.core.security import create_user_token
 from app.db.session import AsyncSessionLocal
-from app.models import ContestBook, ContestRule, RequiredChannel, Test
+from app.models import ContestBook, ContestRule, RequiredChannel, Test, TestAttempt
 from app.services.broadcasts import create_scheduled_broadcast, get_all_broadcasts, run_broadcast_now
 from app.services.content import get_active_books, get_active_rules, get_all_books, get_all_rules
 from app.services.storage import save_bot_file
 from app.services.subscriptions import get_missing_subscriptions
+from app.services.settings import get_referral_share_text, set_referral_share_text
 from app.services.tickets import answer_ticket, create_ticket, reject_ticket
-from app.services.tests import close_test_and_notify, create_test, get_all_tests, get_total_test_score
-from app.services.users import get_user_by_telegram_id, set_phone_number, upsert_telegram_user
+from app.services.tests import (
+    close_test_and_notify,
+    create_test,
+    get_all_tests,
+    get_or_create_attempt,
+    get_test_by_code,
+    get_total_test_score,
+    get_user_rankings,
+    parse_submission_text,
+    submit_attempt_by_letters,
+    user_can_take_test,
+)
+from app.services.users import complete_profile, get_user_by_telegram_id, set_phone_number, upsert_telegram_user
 
 
 router = Router()
 
 
-def build_webapp_url(path: str, telegram_id: int) -> str:
-    settings = get_settings()
-    token = create_user_token(telegram_id)
-    return f"{settings.normalized_web_app_base_url}{path}?token={token}"
+async def start_profile_registration(message: Message, state: FSMContext) -> None:
+    await state.set_state(RegistrationStates.waiting_for_first_name)
+    await message.answer("Ro'yxatdan o'tishni boshlaymiz.\nIsmingizni yuboring.", reply_markup=ReplyKeyboardRemove())
 
 
-def is_local_webapp_url(url: str) -> bool:
-    hostname = (urlparse(url).hostname or "").lower()
-    return hostname in {"localhost", "127.0.0.1", "0.0.0.0"}
-
-
-async def send_webapp_prompt(message: Message, *, text: str, button_text: str, path: str, telegram_id: int) -> None:
-    url = build_webapp_url(path, telegram_id)
-    if is_local_webapp_url(url):
-        await message.answer(f"{text}\n\nLokal havola:\n{url}")
-        return
-    try:
-        await message.answer(
-            text,
-            reply_markup=webapp_inline_button(button_text, url),
-        )
-    except TelegramBadRequest:
-        await message.answer(f"{text}\n\nWeb App havola:\n{url}")
-
-
-async def ensure_user_ready(message: Message, bot: Bot) -> bool:
+async def ensure_user_ready(message: Message, bot: Bot, state: FSMContext | None = None) -> bool:
     async with AsyncSessionLocal() as session:
         user = await get_user_by_telegram_id(session, message.from_user.id)
         if user is None:
@@ -96,13 +90,10 @@ async def ensure_user_ready(message: Message, bot: Bot) -> bool:
             await message.answer(t(language, "start_phone"), reply_markup=phone_keyboard())
             return False
         if not user.is_profile_completed:
-            await send_webapp_prompt(
-                message,
-                text=t(language, "profile_prompt"),
-                button_text=t(language, "open_profile"),
-                path="/app/profile",
-                telegram_id=message.from_user.id,
-            )
+            if state is not None:
+                await start_profile_registration(message, state)
+            else:
+                await message.answer(t(language, "profile_prompt"))
             return False
     return True
 
@@ -149,7 +140,8 @@ def format_tests(tests: list) -> str:
     for test in tests:
         end_at = test.scheduled_end_at.strftime("%Y-%m-%d %H:%M") if test.scheduled_end_at else "qo'lda"
         status = "faol" if test.is_active else "yopilgan"
-        lines.append(f"{test.id}. {test.title} | {test.test_code} | {status} | tugash: {end_at}")
+        creator = test.created_by_telegram_id or "-"
+        lines.append(f"{test.id}. {test.title} | ID: {test.test_code} | {status} | tugash: {end_at} | creator: {creator}")
     return "\n".join(lines)
 
 
@@ -172,8 +164,66 @@ def format_broadcasts(items: list) -> str:
     return "\n".join(lines)
 
 
+def build_referral_share_url(link: str, share_text: str) -> str:
+    return f"https://t.me/share/url?url={quote_plus(link)}&text={quote_plus(share_text)}"
+
+
+def get_user_display_name(user) -> str:
+    if getattr(user, "profile", None):
+        full_name = f"{user.profile.first_name} {user.profile.last_name}".strip()
+        if full_name:
+            return full_name
+    full_name = f"{getattr(user, 'telegram_first_name', '') or ''} {getattr(user, 'telegram_last_name', '') or ''}".strip()
+    if full_name:
+        return full_name
+    return str(user.telegram_id)
+
+
+def format_results_message(language: str, *, my_rank: dict | None, leader: dict | None, total_score: int, test_score: int, referral_score: int) -> str:
+    lines = [
+        f"<b>{escape(t(language, 'results_title'))}</b>",
+        t(language, "results_place", rank=my_rank["rank"] if my_rank else "-"),
+        t(language, "results_score", score=total_score),
+        t(language, "results_test_score", score=test_score),
+        t(language, "results_referral_score", score=referral_score),
+    ]
+    if leader:
+        lines.append(t(language, "results_leader", name=escape(leader["display_name"]), score=leader["total_score"]))
+    elif not my_rank:
+        lines.append(t(language, "results_unranked"))
+    return "\n".join(lines)
+
+
+def format_cabinet_message(language: str, *, user, test_score: int, total_score: int, my_rank: dict | None, attempts: list[TestAttempt]) -> str:
+    profile = user.profile
+    lines = [
+        f"<b>{escape(t(language, 'cabinet_title'))}</b>",
+        t(language, "cabinet_name", value=escape(profile.first_name)),
+        t(language, "cabinet_last_name", value=escape(profile.last_name)),
+        t(language, "cabinet_patronymic", value=escape(profile.patronymic)),
+        t(language, "cabinet_region", value=escape(profile.region)),
+        t(language, "cabinet_district", value=escape(profile.district)),
+        t(language, "cabinet_class", value=profile.school_class),
+        t(language, "cabinet_phone", value=escape(user.phone_number or "-")),
+        t(language, "cabinet_invited", count=user.invited_users_count),
+        t(language, "results_test_score", score=test_score),
+        t(language, "results_referral_score", score=user.referral_score),
+        t(language, "results_score", score=total_score),
+        t(language, "cabinet_rank", rank=my_rank["rank"] if my_rank else "-"),
+        "",
+        f"<b>{escape(t(language, 'cabinet_history_title'))}</b>",
+    ]
+    if attempts:
+        for attempt in attempts:
+            test_name = escape(attempt.test.title if attempt.test else str(attempt.test_id))
+            lines.append(f"{escape(attempt.test.test_code if attempt.test else '-')} | {test_name} | {attempt.score}/{attempt.total_questions}")
+    else:
+        lines.append(t(language, "cabinet_history_empty"))
+    return "\n".join(lines)
+
+
 @router.message(Command("start"))
-async def start_handler(message: Message, command: CommandObject, bot: Bot) -> None:
+async def start_handler(message: Message, command: CommandObject, bot: Bot, state: FSMContext) -> None:
     if not message.from_user:
         return
 
@@ -205,13 +255,7 @@ async def start_handler(message: Message, command: CommandObject, bot: Bot) -> N
             return
 
         if not user.is_profile_completed:
-            await send_webapp_prompt(
-                message,
-                text=t(user.language, "profile_prompt"),
-                button_text=t(user.language, "open_webapp"),
-                path="/app/profile",
-                telegram_id=user.telegram_id,
-            )
+            await start_profile_registration(message, state)
             return
 
     await message.answer(
@@ -221,7 +265,7 @@ async def start_handler(message: Message, command: CommandObject, bot: Bot) -> N
 
 
 @router.callback_query(F.data == "check_subscriptions")
-async def check_subscriptions_handler(callback: CallbackQuery, bot: Bot) -> None:
+async def check_subscriptions_handler(callback: CallbackQuery, bot: Bot, state: FSMContext) -> None:
     if not callback.from_user or not callback.message:
         return
 
@@ -247,20 +291,14 @@ async def check_subscriptions_handler(callback: CallbackQuery, bot: Bot) -> None
         if not user.phone_number:
             await callback.message.answer(t(user.language, "subscription_verified"), reply_markup=phone_keyboard())
         elif not user.is_profile_completed:
-            await send_webapp_prompt(
-                callback.message,
-                text=t(user.language, "profile_prompt"),
-                button_text=t(user.language, "open_webapp"),
-                path="/app/profile",
-                telegram_id=user.telegram_id,
-            )
+            await start_profile_registration(callback.message, state)
         else:
             await callback.message.answer(t(user.language, "start_ready"), reply_markup=main_menu_keyboard(user.language))
     await callback.answer()
 
 
 @router.message(F.contact)
-async def contact_handler(message: Message) -> None:
+async def contact_handler(message: Message, state: FSMContext) -> None:
     if not message.from_user or not message.contact:
         return
     if message.contact.user_id and message.contact.user_id != message.from_user.id:
@@ -282,13 +320,81 @@ async def contact_handler(message: Message) -> None:
         t(language, "contact_saved"),
         reply_markup=ReplyKeyboardRemove(),
     )
-    await send_webapp_prompt(
-        message,
-        text=t(language, "profile_prompt"),
-        button_text=t(language, "open_profile"),
-        path="/app/profile",
-        telegram_id=message.from_user.id,
-    )
+    await start_profile_registration(message, state)
+
+
+@router.message(RegistrationStates.waiting_for_first_name)
+async def registration_first_name_handler(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not message.text:
+        return
+    await state.update_data(first_name=message.text.strip())
+    await state.set_state(RegistrationStates.waiting_for_last_name)
+    await message.answer("Familiyangizni yuboring.")
+
+
+@router.message(RegistrationStates.waiting_for_last_name)
+async def registration_last_name_handler(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not message.text:
+        return
+    await state.update_data(last_name=message.text.strip())
+    await state.set_state(RegistrationStates.waiting_for_patronymic)
+    await message.answer("Otasining ismini yuboring.")
+
+
+@router.message(RegistrationStates.waiting_for_patronymic)
+async def registration_patronymic_handler(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not message.text:
+        return
+    await state.update_data(patronymic=message.text.strip())
+    await state.set_state(RegistrationStates.waiting_for_region)
+    await message.answer("Viloyatni tanlang.", reply_markup=regions_keyboard())
+
+
+@router.callback_query(RegistrationStates.waiting_for_region, F.data.startswith("reg_region:"))
+async def registration_region_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.message:
+        return
+    region = callback.data.split(":", 1)[1]
+    await state.update_data(region=region)
+    await state.set_state(RegistrationStates.waiting_for_district)
+    await callback.message.answer(f"Tanlangan viloyat: {region}\nEndi tuman nomini matn ko'rinishida yuboring.")
+    await callback.answer()
+
+
+@router.message(RegistrationStates.waiting_for_district)
+async def registration_district_handler(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not message.text:
+        return
+    await state.update_data(district=message.text.strip())
+    await state.set_state(RegistrationStates.waiting_for_school_class)
+    await message.answer("Sinfni tanlang.", reply_markup=classes_keyboard())
+
+
+@router.callback_query(RegistrationStates.waiting_for_school_class, F.data.startswith("reg_class:"))
+async def registration_class_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.message:
+        return
+    school_class = int(callback.data.split(":", 1)[1])
+    data = await state.get_data()
+    async with AsyncSessionLocal() as session:
+        user = await get_user_by_telegram_id(session, callback.from_user.id)
+        if user is None:
+            await callback.message.answer("Avval /start yuboring.")
+            await callback.answer()
+            return
+        await complete_profile(
+            session,
+            user,
+            first_name=data["first_name"],
+            last_name=data["last_name"],
+            patronymic=data["patronymic"],
+            region=data["region"],
+            district=data["district"],
+            school_class=school_class,
+        )
+    await state.clear()
+    await callback.message.answer("Ro'yxatdan o'tish yakunlandi.", reply_markup=main_menu_keyboard(user.language))
+    await callback.answer()
 
 
 @router.message(Command("admin"))
@@ -368,6 +474,14 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await callback.message.answer(f"{format_content(await get_all_books(session), 'Kitoblar')}\n\nO'chirish uchun ID yuboring.")
         elif action == "broadcast":
             await callback.message.edit_text("Broadcast boshqaruvi:", reply_markup=admin_broadcast_keyboard())
+        elif action == "referral_text":
+            current_text = await get_referral_share_text(session)
+            await state.set_state(AdminStates.waiting_for_referral_text)
+            preview = current_text or "Hozircha alohida izoh yo'q."
+            await callback.message.answer(
+                "Referral havola ostidagi izohni yuboring.\n`yo'q` yuborsangiz izoh o'chiriladi.\n\n"
+                f"Joriy izoh:\n{preview}"
+            )
         elif action == "broadcast_now":
             await state.update_data(broadcast_mode="now")
             await state.set_state(AdminStates.waiting_for_broadcast_message)
@@ -424,13 +538,28 @@ async def admin_channel_delete_handler(message: Message, state: FSMContext) -> N
     await message.answer("Kanal o'chirildi.", reply_markup=admin_panel_keyboard())
 
 
+@router.message(AdminStates.waiting_for_referral_text)
+async def admin_referral_text_handler(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not message.text or not is_admin(message.from_user.id):
+        return
+    raw_text = message.text.strip()
+    text = None if raw_text.lower() in {"yo'q", "yoq", "none", "no", "-"} else raw_text
+    async with AsyncSessionLocal() as session:
+        await set_referral_share_text(session, text)
+    await state.clear()
+    if text:
+        await message.answer("Referral izohi saqlandi.", reply_markup=admin_panel_keyboard())
+    else:
+        await message.answer("Referral izohi o'chirildi.", reply_markup=admin_panel_keyboard())
+
+
 @router.message(AdminStates.waiting_for_test_title)
 async def admin_test_title_handler(message: Message, state: FSMContext) -> None:
     if not message.from_user or not message.text or not is_admin(message.from_user.id):
         return
     await state.update_data(title=message.text.strip())
     await state.set_state(AdminStates.waiting_for_test_code)
-    await message.answer("Test kodini yuboring. Masalan: TEST-01")
+    await message.answer("Test ID ni yuboring. Masalan: 1234")
 
 
 @router.message(AdminStates.waiting_for_test_code)
@@ -438,16 +567,6 @@ async def admin_test_code_handler(message: Message, state: FSMContext) -> None:
     if not message.from_user or not message.text or not is_admin(message.from_user.id):
         return
     await state.update_data(test_code=message.text.strip().upper())
-    await state.set_state(AdminStates.waiting_for_test_description)
-    await message.answer("Test tavsifini yuboring. Kerak bo'lmasa `-` yuboring.")
-
-
-@router.message(AdminStates.waiting_for_test_description)
-async def admin_test_description_handler(message: Message, state: FSMContext) -> None:
-    if not message.from_user or not message.text or not is_admin(message.from_user.id):
-        return
-    description = None if message.text.strip() == "-" else message.text.strip()
-    await state.update_data(description=description)
     await state.set_state(AdminStates.waiting_for_test_min_referrals)
     await message.answer("Test uchun minimal referral sonini yuboring.")
 
@@ -476,16 +595,14 @@ async def admin_test_end_at_handler(message: Message, state: FSMContext) -> None
         await message.answer("Vaqt formati xato. `YYYY-MM-DD HH:MM` ko'rinishida yuboring yoki `yo'q` deb yozing.")
         return
     await state.update_data(scheduled_end_at=scheduled_end_at.isoformat() if scheduled_end_at else "")
-    await state.set_state(AdminStates.waiting_for_test_questions)
+    await state.set_state(AdminStates.waiting_for_test_answer_key)
     await message.answer(
-        "Savollarni JSON massiv ko'rinishida yuboring.\n"
-        "Savol matni shart emas, faqat variantlar va to'g'ri javobni yuborsangiz bo'ladi.\n"
-        "[{\"options\":[\"A\",\"B\",\"C\",\"D\"],\"correct_index\":1}]"
+        "Javob kalitini yuboring.\nMisollar:\nABCDA\n1a2b3c4d5a\nA B C D A"
     )
 
 
-@router.message(AdminStates.waiting_for_test_questions)
-async def admin_test_questions_handler(message: Message, state: FSMContext) -> None:
+@router.message(AdminStates.waiting_for_test_answer_key)
+async def admin_test_answer_key_handler(message: Message, state: FSMContext) -> None:
     if not message.from_user or not message.text or not is_admin(message.from_user.id):
         return
     data = await state.get_data()
@@ -496,16 +613,19 @@ async def admin_test_questions_handler(message: Message, state: FSMContext) -> N
                 session,
                 title=data["title"],
                 test_code=data["test_code"],
-                description=data.get("description"),
+                answer_key=message.text,
                 min_referrals=int(data["min_referrals"]),
+                created_by_telegram_id=message.from_user.id,
                 scheduled_end_at=scheduled_end_at,
-                questions_payload=message.text,
             )
         except Exception as exc:
             await message.answer(f"Test yaratilmadi: {exc}")
             return
     await state.clear()
-    await message.answer(f"Test yaratildi: {test.title} ({test.test_code})", reply_markup=admin_panel_keyboard())
+    await message.answer(
+        f"Test yaratildi: {test.title}\nID: {test.test_code}\nSavollar soni: {len(test.answer_key)}",
+        reply_markup=admin_panel_keyboard(),
+    )
 
 
 @router.message(AdminStates.waiting_for_test_close)
@@ -648,6 +768,49 @@ async def admin_broadcast_schedule_handler(message: Message, state: FSMContext) 
     await message.answer("Scheduled broadcast saqlandi.", reply_markup=admin_panel_keyboard())
 
 
+@router.message(StateFilter(None), F.text.regexp(r".+\*.+"))
+async def test_submission_handler(message: Message, bot: Bot, state: FSMContext) -> None:
+    if not message.from_user or not message.text:
+        return
+    ready = await ensure_user_ready(message, bot, state)
+    if not ready:
+        return
+
+    try:
+        test_code, answers = parse_submission_text(message.text.strip())
+    except ValueError:
+        return
+
+    async with AsyncSessionLocal() as session:
+        user = await get_user_by_telegram_id(session, message.from_user.id)
+        if user is None:
+            return
+        test = await get_test_by_code(session, test_code)
+        if test is None:
+            await message.answer("Test ID topilmadi yoki test yopilgan.")
+            return
+        if not user_can_take_test(user, test):
+            await message.answer(
+                t(user.language, "test_locked", minimum=test.min_referrals, count=user.invited_users_count),
+                reply_markup=main_menu_keyboard(user.language),
+            )
+            return
+        attempt = await get_or_create_attempt(session, user, test)
+        if attempt.status == "completed":
+            await message.answer("Siz bu testni allaqachon topshirgansiz.")
+            return
+        try:
+            submitted = await submit_attempt_by_letters(session, attempt, answers)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+
+    await message.answer(
+        f"Javoblar qabul qilindi.\nTest: {submitted.test.title}\nNatija: {submitted.score}/{submitted.total_questions}",
+        reply_markup=main_menu_keyboard(user.language),
+    )
+
+
 @router.message(StateFilter(None), F.text)
 async def menu_handler(message: Message, state: FSMContext, bot: Bot) -> None:
     if not message.from_user:
@@ -666,20 +829,27 @@ async def menu_handler(message: Message, state: FSMContext, bot: Bot) -> None:
             settings = get_settings()
             link = f"https://t.me/{settings.bot_username}?start={user.referral_code}"
             test_score = await get_total_test_score(session, user.id)
+            custom_caption = await get_referral_share_text(session)
+            invite_text = t(
+                user.language,
+                "invite_text",
+                link=link,
+                count=user.invited_users_count,
+                score=user.referral_score,
+                total=user.referral_score + test_score,
+            )
+            if custom_caption:
+                invite_text = f"{invite_text}\n\n{t(user.language, 'invite_share_caption', caption=custom_caption)}"
+            share_text = custom_caption or t(user.language, "invite_share_default")
+            share_url = build_referral_share_url(link, share_text)
+            await message.answer(invite_text, reply_markup=main_menu_keyboard(user.language))
             await message.answer(
-                t(
-                    user.language,
-                    "invite_text",
-                    link=link,
-                    count=user.invited_users_count,
-                    score=user.referral_score,
-                    total=user.referral_score + test_score,
-                ),
-                reply_markup=main_menu_keyboard(user.language),
+                t(user.language, "invite_share_prompt"),
+                reply_markup=referral_share_keyboard(share_url, t(user.language, "invite_share_button")),
             )
         return
 
-    ready = await ensure_user_ready(message, bot)
+    ready = await ensure_user_ready(message, bot, state)
     if not ready:
         return
 
@@ -692,33 +862,47 @@ async def menu_handler(message: Message, state: FSMContext, bot: Bot) -> None:
                     reply_markup=main_menu_keyboard(user.language),
                 )
                 return
-            await message.answer(
-                t(user.language, "test_open_prompt"),
-            )
-            await send_webapp_prompt(
-                message,
-                text=t(user.language, "test_open_prompt"),
-                button_text=t(user.language, "open_tests"),
-                path="/app/tests",
-                telegram_id=message.from_user.id,
-            )
+            await message.answer(t(user.language, "test_open_prompt"))
             return
         if menu_key == "results":
-            await send_webapp_prompt(
-                message,
-                text=t(user.language, "results_prompt"),
-                button_text=t(user.language, "open_results"),
-                path="/app/results",
-                telegram_id=message.from_user.id,
+            rankings = await get_user_rankings(session)
+            my_rank = next((item for item in rankings if item["user_id"] == user.id), None)
+            leader = rankings[0] if rankings else None
+            test_score = await get_total_test_score(session, user.id)
+            await message.answer(
+                format_results_message(
+                    user.language,
+                    my_rank=my_rank,
+                    leader=leader,
+                    total_score=test_score + user.referral_score,
+                    test_score=test_score,
+                    referral_score=user.referral_score,
+                ),
+                reply_markup=main_menu_keyboard(user.language),
             )
             return
         if menu_key == "cabinet":
-            await send_webapp_prompt(
-                message,
-                text=t(user.language, "cabinet_prompt"),
-                button_text=t(user.language, "open_cabinet"),
-                path="/app/cabinet",
-                telegram_id=message.from_user.id,
+            rankings = await get_user_rankings(session)
+            my_rank = next((item for item in rankings if item["user_id"] == user.id), None)
+            test_score = await get_total_test_score(session, user.id)
+            stmt = (
+                select(TestAttempt)
+                .options(selectinload(TestAttempt.test))
+                .where(TestAttempt.user_id == user.id)
+                .order_by(TestAttempt.id.desc())
+                .limit(5)
+            )
+            attempts = list((await session.scalars(stmt)).all())
+            await message.answer(
+                format_cabinet_message(
+                    user.language,
+                    user=user,
+                    test_score=test_score,
+                    total_score=test_score + user.referral_score,
+                    my_rank=my_rank,
+                    attempts=attempts,
+                ),
+                reply_markup=main_menu_keyboard(user.language),
             )
             return
         if menu_key == "rules":

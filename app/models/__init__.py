@@ -1,5 +1,6 @@
 from app.models.entities import (
     AttemptStatus,
+    BotConfig,
     ContestBook,
     ContestRule,
     Question,
@@ -17,6 +18,7 @@ from app.models.entities import (
 
 __all__ = [
     "AttemptStatus",
+    "BotConfig",
     "ContestBook",
     "ContestRule",
     "Question",
