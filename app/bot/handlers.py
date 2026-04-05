@@ -128,6 +128,23 @@ async def get_test_by_reference(session, value: str) -> Test | None:
     return await session.scalar(code_stmt)
 
 
+async def get_channel_by_reference(session, value: str) -> RequiredChannel | None:
+    raw_value = value.strip()
+    if raw_value.isdigit():
+        channel = await session.get(RequiredChannel, int(raw_value))
+        if channel is not None:
+            return channel
+        return await session.scalar(select(RequiredChannel).where(RequiredChannel.chat_id == int(raw_value)))
+    normalized_reference = normalize_channel_reference(raw_value)
+    normalized_url = normalize_channel_url(raw_value)
+    stmt = select(RequiredChannel).where(
+        (RequiredChannel.invite_link == normalized_url)
+        | (RequiredChannel.invite_link == normalized_reference)
+        | (RequiredChannel.invite_link == raw_value)
+    )
+    return await session.scalar(stmt)
+
+
 async def send_attachment(message: Message, path: str) -> None:
     file_path = Path(path)
     if not file_path.exists():
@@ -159,7 +176,7 @@ def format_channels(channels: list[RequiredChannel]) -> str:
         return "Majburiy kanallar yo'q."
     lines = ["Majburiy kanallar:"]
     for channel in channels:
-        lines.append(f"{channel.id}. {channel.title} | chat_id={channel.chat_id}")
+        lines.append(f"{channel.id}. {channel.title} | chat_id={channel.chat_id} | {channel.invite_link or '-'}")
     return "\n".join(lines)
 
 
@@ -588,7 +605,9 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
         elif action == "delete_channel":
             channels = list((await session.scalars(select(RequiredChannel).order_by(RequiredChannel.id.desc()))).all())
             await state.set_state(AdminStates.waiting_for_channel_delete)
-            await callback.message.answer(f"{format_channels(channels)}\n\nO'chirish uchun kanal ID yuboring.")
+            await callback.message.answer(
+                f"{format_channels(channels)}\n\nO'chirish uchun kanal ID, chat_id yoki @username yuboring."
+            )
         elif action == "tests":
             await safe_edit_text(callback.message, "Testlar boshqaruvi:", reply_markup=admin_tests_keyboard())
         elif action == "list_tests":
@@ -736,20 +755,16 @@ async def admin_channel_create_handler(message: Message, state: FSMContext, bot:
 async def admin_channel_delete_handler(message: Message, state: FSMContext) -> None:
     if not message.from_user or not message.text or not is_admin(message.from_user.id):
         return
-    try:
-        channel_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("Kanal ID ni son ko'rinishida yuboring.")
-        return
     async with AsyncSessionLocal() as session:
-        channel = await session.get(RequiredChannel, channel_id)
+        channel = await get_channel_by_reference(session, message.text)
         if channel is None:
-            await message.answer("Kanal topilmadi.")
+            await message.answer("Kanal topilmadi. ID, chat_id yoki @username yuboring.")
             return
+        removed_title = channel.title
         await session.delete(channel)
         await session.commit()
     await state.clear()
-    await message.answer("Kanal o'chirildi.", reply_markup=admin_panel_keyboard())
+    await message.answer(f"🗑 Kanal o'chirildi: {removed_title}", reply_markup=admin_panel_keyboard())
 
 
 @router.message(AdminStates.waiting_for_referral_content)
