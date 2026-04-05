@@ -32,6 +32,7 @@ from app.bot.keyboards import (
     admin_test_builder_keyboard,
     admin_tests_keyboard,
     main_menu_keyboard,
+    normalize_channel_url,
     phone_keyboard,
     referral_share_keyboard,
     regions_keyboard,
@@ -223,6 +224,21 @@ def format_test_builder_summary(data: dict) -> str:
 
 def build_referral_share_url(link: str, share_text: str) -> str:
     return f"https://t.me/share/url?url={quote_plus(link)}&text={quote_plus(share_text)}"
+
+
+def normalize_channel_reference(raw_value: str) -> str:
+    value = raw_value.strip()
+    if value.startswith("https://t.me/"):
+        return f"@{value.removeprefix('https://t.me/').strip('/')}"
+    if value.startswith("http://t.me/"):
+        return f"@{value.removeprefix('http://t.me/').strip('/')}"
+    if value.startswith("t.me/"):
+        return f"@{value.removeprefix('t.me/').strip('/')}"
+    if value.startswith("telegram.me/"):
+        return f"@{value.removeprefix('telegram.me/').strip('/')}"
+    if value.startswith("@"):
+        return value
+    return f"@{value.lstrip('/')}"
 
 
 async def safe_edit_text(message: Message, text: str, **kwargs) -> None:
@@ -564,7 +580,11 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await safe_edit_text(callback.message, format_channels(channels), reply_markup=admin_channels_keyboard())
         elif action == "add_channel":
             await state.set_state(AdminStates.waiting_for_channel_create)
-            await callback.message.answer("Yangi kanalni `nom | chat_id | invite_link` formatida yuboring.")
+            await callback.message.answer(
+                "Yangi kanal uchun faqat username yoki havolani yuboring.\n"
+                "Masalan: `@FizikaMathUz` yoki `https://t.me/FizikaMathUz`\n"
+                "Bot kanal nomi va chat ID ni o'zi topadi."
+            )
         elif action == "delete_channel":
             channels = list((await session.scalars(select(RequiredChannel).order_by(RequiredChannel.id.desc()))).all())
             await state.set_state(AdminStates.waiting_for_channel_delete)
@@ -682,25 +702,34 @@ async def admin_test_finish_callback(callback: CallbackQuery, state: FSMContext)
 
 
 @router.message(AdminStates.waiting_for_channel_create)
-async def admin_channel_create_handler(message: Message, state: FSMContext) -> None:
+async def admin_channel_create_handler(message: Message, state: FSMContext, bot: Bot) -> None:
     if not message.from_user or not message.text or not is_admin(message.from_user.id):
         return
-    parts = [part.strip() for part in message.text.split("|")]
-    if len(parts) < 2:
-        await message.answer("Format noto'g'ri. `nom | chat_id | invite_link` ko'rinishida yuboring.")
-        return
-    title = parts[0]
     try:
-        chat_id = int(parts[1])
-    except ValueError:
-        await message.answer("`chat_id` son bo'lishi kerak.")
+        reference = normalize_channel_reference(message.text)
+        chat = await bot.get_chat(reference)
+    except TelegramBadRequest:
+        await message.answer(
+            "Kanal topilmadi yoki bot kanalni ko'ra olmayapti.\n"
+            "Username ni `@kanal` ko'rinishida yuboring va bot kanalga qo'shilganini tekshiring."
+        )
         return
-    invite_link = parts[2] if len(parts) > 2 and parts[2] else None
+    title = getattr(chat, "title", None) or getattr(chat, "full_name", None) or reference
+    invite_link = normalize_channel_url(message.text)
     async with AsyncSessionLocal() as session:
-        session.add(RequiredChannel(title=title, chat_id=chat_id, invite_link=invite_link, is_active=True))
+        existing = await session.scalar(select(RequiredChannel).where(RequiredChannel.chat_id == int(chat.id)))
+        if existing is not None:
+            existing.title = title
+            existing.invite_link = invite_link
+            existing.is_active = True
+        else:
+            session.add(RequiredChannel(title=title, chat_id=int(chat.id), invite_link=invite_link, is_active=True))
         await session.commit()
     await state.clear()
-    await message.answer("Kanal qo'shildi.", reply_markup=admin_panel_keyboard())
+    await message.answer(
+        f"✅ Kanal qo'shildi.\n📝 Nomi: {title}\n🆔 Chat ID: {int(chat.id)}\n🔗 Havola: {invite_link}",
+        reply_markup=admin_panel_keyboard(),
+    )
 
 
 @router.message(AdminStates.waiting_for_channel_delete)

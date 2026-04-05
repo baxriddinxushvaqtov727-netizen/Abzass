@@ -10,6 +10,23 @@ from app.core.constants import REGIONS
 from app.core.i18n import menu_texts, t
 
 
+def normalize_channel_url(raw_url: str | None) -> str:
+    if not raw_url:
+        return "https://t.me/"
+    value = raw_url.strip()
+    if not value:
+        return "https://t.me/"
+    if value.startswith("https://") or value.startswith("http://"):
+        return value
+    if value.startswith("@"):
+        return f"https://t.me/{value[1:]}"
+    if value.startswith("t.me/"):
+        return f"https://{value}"
+    if value.startswith("telegram.me/"):
+        return f"https://{value}"
+    return f"https://t.me/{value.lstrip('/')}"
+
+
 def required_channels_keyboard(channels: list[dict], language: str) -> InlineKeyboardMarkup:
     rows = []
     for channel in channels:
@@ -17,7 +34,7 @@ def required_channels_keyboard(channels: list[dict], language: str) -> InlineKey
             [
                 InlineKeyboardButton(
                     text=f"Obuna bo'lish: {channel['title']}",
-                    url=channel["url"],
+                    url=normalize_channel_url(channel["url"]),
                 )
             ]
         )
