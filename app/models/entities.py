@@ -96,10 +96,11 @@ class Test(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(255))
     test_code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    answer_key: Mapped[str] = mapped_column(Text)
+    answer_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     min_referrals: Mapped[int] = mapped_column(Integer, default=3)
+    question_time_limit: Mapped[int] = mapped_column(Integer, default=30)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     scheduled_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -142,11 +143,16 @@ class TestAttempt(TimestampMixin, Base):
     score: Mapped[int] = mapped_column(Integer, default=0)
     total_questions: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default=AttemptStatus.STARTED.value)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_question_index: Mapped[int] = mapped_column(Integer, default=0)
+    question_order_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    option_order_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="attempts")
     test: Mapped["Test"] = relationship(back_populates="attempts")
     answers: Mapped[list["TestAnswer"]] = relationship(back_populates="attempt", cascade="all, delete-orphan")
+    active_polls: Mapped[list["ActiveQuizPoll"]] = relationship(back_populates="attempt", cascade="all, delete-orphan")
 
 
 class TestAnswer(TimestampMixin, Base):
@@ -193,3 +199,18 @@ class BotConfig(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     referral_share_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    referral_share_media_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
+
+class ActiveQuizPoll(TimestampMixin, Base):
+    __tablename__ = "active_quiz_polls"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    poll_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey("test_attempts.id"), index=True)
+    question_id: Mapped[int] = mapped_column(ForeignKey("questions.id"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    is_processed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    attempt: Mapped["TestAttempt"] = relationship(back_populates="active_polls")
+    question: Mapped["Question"] = relationship()

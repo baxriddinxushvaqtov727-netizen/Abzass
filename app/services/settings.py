@@ -22,9 +22,20 @@ async def get_referral_share_text(session: AsyncSession) -> str | None:
     return None
 
 
-async def set_referral_share_text(session: AsyncSession, text: str | None) -> BotConfig:
+async def get_referral_share_media_path(session: AsyncSession) -> str | None:
+    config = await get_or_create_bot_config(session)
+    return config.referral_share_media_path
+
+
+async def set_referral_share_content(
+    session: AsyncSession,
+    *,
+    text: str | None,
+    media_path: str | None,
+) -> BotConfig:
     config = await get_or_create_bot_config(session)
     config.referral_share_text = text.strip() if text else None
+    config.referral_share_media_path = media_path
     await session.commit()
     await session.refresh(config)
     return config

@@ -7,6 +7,7 @@ from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -14,6 +15,7 @@ from aiogram.types import (
     Document,
     FSInputFile,
     Message,
+    PollAnswer,
     PhotoSize,
     ReplyKeyboardRemove,
 )
@@ -26,6 +28,7 @@ from app.bot.keyboards import (
     admin_content_keyboard,
     admin_panel_keyboard,
     admin_ticket_actions,
+    admin_test_builder_keyboard,
     admin_tests_keyboard,
     classes_keyboard,
     main_menu_keyboard,
@@ -33,10 +36,10 @@ from app.bot.keyboards import (
     referral_share_keyboard,
     regions_keyboard,
     required_channels_keyboard,
+    test_selection_keyboard,
 )
 from app.bot.states import AdminStates, RegistrationStates, SupportStates
 from app.core.config import get_settings
-from app.core.constants import MIN_REFERRALS_FOR_TEST
 from app.core.i18n import resolve_menu_key, t
 from app.db.session import AsyncSessionLocal
 from app.models import ContestBook, ContestRule, RequiredChannel, Test, TestAttempt
@@ -44,18 +47,24 @@ from app.services.broadcasts import create_scheduled_broadcast, get_all_broadcas
 from app.services.content import get_active_books, get_active_rules, get_all_books, get_all_rules
 from app.services.storage import save_bot_file
 from app.services.subscriptions import get_missing_subscriptions
-from app.services.settings import get_referral_share_text, set_referral_share_text
+from app.services.settings import (
+    get_referral_share_media_path,
+    get_referral_share_text,
+    set_referral_share_content,
+)
 from app.services.tickets import answer_ticket, create_ticket, reject_ticket
 from app.services.tests import (
     close_test_and_notify,
     create_test,
+    get_active_tests,
     get_all_tests,
     get_or_create_attempt,
-    get_test_by_code,
+    get_referral_rankings,
+    get_test_by_id,
+    get_test_rankings,
     get_total_test_score,
-    get_user_rankings,
-    parse_submission_text,
-    submit_attempt_by_letters,
+    handle_poll_answer,
+    start_quiz_attempt,
     user_can_take_test,
 )
 from app.services.users import complete_profile, get_user_by_telegram_id, set_phone_number, upsert_telegram_user
@@ -135,13 +144,17 @@ def format_channels(channels: list[RequiredChannel]) -> str:
 
 def format_tests(tests: list) -> str:
     if not tests:
-        return "Testlar yo'q."
-    lines = ["Mavjud testlar:"]
+        return "📝 Testlar yo'q."
+    lines = ["📝 Mavjud testlar:"]
     for test in tests:
         end_at = test.scheduled_end_at.strftime("%Y-%m-%d %H:%M") if test.scheduled_end_at else "qo'lda"
         status = "faol" if test.is_active else "yopilgan"
         creator = test.created_by_telegram_id or "-"
-        lines.append(f"{test.id}. {test.title} | ID: {test.test_code} | {status} | tugash: {end_at} | creator: {creator}")
+        question_count = len(test.questions) if getattr(test, "questions", None) is not None else "-"
+        lines.append(
+            f"{test.id}. {test.title} | ID: {test.test_code} | {status} | savol: {question_count} | "
+            f"limit: {test.question_time_limit}s | tugash: {end_at} | creator: {creator}"
+        )
     return "\n".join(lines)
 
 
@@ -164,8 +177,41 @@ def format_broadcasts(items: list) -> str:
     return "\n".join(lines)
 
 
+def parse_test_options(value: str) -> list[str]:
+    options = [item.strip() for item in value.split("|") if item.strip()]
+    if len(options) != 4:
+        raise ValueError("Aynan 4 ta variant yuboring. Format: A | B | C | D")
+    return options
+
+
+def format_test_builder_summary(data: dict) -> str:
+    questions = data.get("questions", [])
+    lines = [
+        "🧪 Test draft",
+        f"📌 Nomi: {data.get('title', '-')}",
+        f"🆔 ID: {data.get('test_code', '-')}",
+        f"🤝 Min referral: {data.get('min_referrals', '-')}",
+        f"⏱ Har savol vaqti: {data.get('question_time_limit', '-')} soniya",
+        f"❓ Savollar soni: {len(questions)}",
+    ]
+    if questions:
+        last_question = questions[-1]
+        lines.append("")
+        lines.append(f"So'nggi savol: {last_question['text']}")
+    return "\n".join(lines)
+
+
 def build_referral_share_url(link: str, share_text: str) -> str:
     return f"https://t.me/share/url?url={quote_plus(link)}&text={quote_plus(share_text)}"
+
+
+async def safe_edit_text(message: Message, text: str, **kwargs) -> None:
+    try:
+        await message.edit_text(text, **kwargs)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        raise
 
 
 def get_user_display_name(user) -> str:
@@ -179,39 +225,58 @@ def get_user_display_name(user) -> str:
     return str(user.telegram_id)
 
 
-def format_results_message(language: str, *, my_rank: dict | None, leader: dict | None, total_score: int, test_score: int, referral_score: int) -> str:
+def format_results_message(
+    language: str,
+    *,
+    my_test_rank: dict | None,
+    test_leader: dict | None,
+    my_referral_rank: dict | None,
+    referral_leader: dict | None,
+    test_score: int,
+    referral_score: int,
+) -> str:
     lines = [
-        f"<b>{escape(t(language, 'results_title'))}</b>",
-        t(language, "results_place", rank=my_rank["rank"] if my_rank else "-"),
-        t(language, "results_score", score=total_score),
-        t(language, "results_test_score", score=test_score),
-        t(language, "results_referral_score", score=referral_score),
+        f"<b>📊 {escape(t(language, 'results_title'))}</b>",
+        f"📝 {t(language, 'results_test_score', score=test_score)}",
+        f"🏅 Test o'rni: {my_test_rank['rank'] if my_test_rank else '-'}",
+        f"🤝 {t(language, 'results_referral_score', score=referral_score)}",
+        f"🌟 Referral o'rni: {my_referral_rank['rank'] if my_referral_rank else '-'}",
     ]
-    if leader:
-        lines.append(t(language, "results_leader", name=escape(leader["display_name"]), score=leader["total_score"]))
-    elif not my_rank:
+    if test_leader:
+        lines.append(f"🥇 Test lideri: {escape(test_leader['display_name'])} - {test_leader['test_score']} ball")
+    if referral_leader:
+        lines.append(f"🏆 Referral lideri: {escape(referral_leader['display_name'])} - {referral_leader['referral_score']} ball")
+    if not my_test_rank and not my_referral_rank:
         lines.append(t(language, "results_unranked"))
     return "\n".join(lines)
 
 
-def format_cabinet_message(language: str, *, user, test_score: int, total_score: int, my_rank: dict | None, attempts: list[TestAttempt]) -> str:
+def format_cabinet_message(
+    language: str,
+    *,
+    user,
+    test_score: int,
+    my_test_rank: dict | None,
+    my_referral_rank: dict | None,
+    attempts: list[TestAttempt],
+) -> str:
     profile = user.profile
     lines = [
-        f"<b>{escape(t(language, 'cabinet_title'))}</b>",
-        t(language, "cabinet_name", value=escape(profile.first_name)),
-        t(language, "cabinet_last_name", value=escape(profile.last_name)),
-        t(language, "cabinet_patronymic", value=escape(profile.patronymic)),
-        t(language, "cabinet_region", value=escape(profile.region)),
-        t(language, "cabinet_district", value=escape(profile.district)),
-        t(language, "cabinet_class", value=profile.school_class),
-        t(language, "cabinet_phone", value=escape(user.phone_number or "-")),
-        t(language, "cabinet_invited", count=user.invited_users_count),
-        t(language, "results_test_score", score=test_score),
-        t(language, "results_referral_score", score=user.referral_score),
-        t(language, "results_score", score=total_score),
-        t(language, "cabinet_rank", rank=my_rank["rank"] if my_rank else "-"),
+        f"<b>👤 {escape(t(language, 'cabinet_title'))}</b>",
+        f"🧑 {t(language, 'cabinet_name', value=escape(profile.first_name))}",
+        f"🪪 {t(language, 'cabinet_last_name', value=escape(profile.last_name))}",
+        f"👨‍👦 {t(language, 'cabinet_patronymic', value=escape(profile.patronymic))}",
+        f"📍 {t(language, 'cabinet_region', value=escape(profile.region))}",
+        f"🏘 {t(language, 'cabinet_district', value=escape(profile.district))}",
+        f"🎓 {t(language, 'cabinet_class', value=profile.school_class)}",
+        f"📱 {t(language, 'cabinet_phone', value=escape(user.phone_number or '-'))}",
+        f"🤝 {t(language, 'cabinet_invited', count=user.invited_users_count)}",
+        f"📝 {t(language, 'results_test_score', score=test_score)}",
+        f"🏅 Test o'rni: {my_test_rank['rank'] if my_test_rank else '-'}",
+        f"🌟 {t(language, 'results_referral_score', score=user.referral_score)}",
+        f"🏆 Referral o'rni: {my_referral_rank['rank'] if my_referral_rank else '-'}",
         "",
-        f"<b>{escape(t(language, 'cabinet_history_title'))}</b>",
+        f"<b>📚 {escape(t(language, 'cabinet_history_title'))}</b>",
     ]
     if attempts:
         for attempt in attempts:
@@ -424,12 +489,12 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
 
     async with AsyncSessionLocal() as session:
         if action == "home":
-            await callback.message.edit_text("Telegram admin panel.\nBo'limni tanlang:", reply_markup=admin_panel_keyboard())
+            await safe_edit_text(callback.message, "Telegram admin panel.\nBo'limni tanlang:", reply_markup=admin_panel_keyboard())
         elif action == "channels":
-            await callback.message.edit_text("Kanallar boshqaruvi:", reply_markup=admin_channels_keyboard())
+            await safe_edit_text(callback.message, "Kanallar boshqaruvi:", reply_markup=admin_channels_keyboard())
         elif action == "list_channels":
             channels = list((await session.scalars(select(RequiredChannel).order_by(RequiredChannel.id.desc()))).all())
-            await callback.message.edit_text(format_channels(channels), reply_markup=admin_channels_keyboard())
+            await safe_edit_text(callback.message, format_channels(channels), reply_markup=admin_channels_keyboard())
         elif action == "add_channel":
             await state.set_state(AdminStates.waiting_for_channel_create)
             await callback.message.answer("Yangi kanalni `nom | chat_id | invite_link` formatida yuboring.")
@@ -438,12 +503,12 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await state.set_state(AdminStates.waiting_for_channel_delete)
             await callback.message.answer(f"{format_channels(channels)}\n\nO'chirish uchun kanal ID yuboring.")
         elif action == "tests":
-            await callback.message.edit_text("Testlar boshqaruvi:", reply_markup=admin_tests_keyboard())
+            await safe_edit_text(callback.message, "Testlar boshqaruvi:", reply_markup=admin_tests_keyboard())
         elif action == "list_tests":
-            await callback.message.edit_text(format_tests(await get_all_tests(session)), reply_markup=admin_tests_keyboard())
+            await safe_edit_text(callback.message, format_tests(await get_all_tests(session)), reply_markup=admin_tests_keyboard())
         elif action == "add_test":
             await state.set_state(AdminStates.waiting_for_test_title)
-            await callback.message.answer("Test nomini yuboring.")
+            await callback.message.answer("🧪 Test nomini yuboring.")
         elif action == "close_test":
             await state.set_state(AdminStates.waiting_for_test_close)
             await callback.message.answer(f"{format_tests(await get_all_tests(session))}\n\nYopish uchun test ID yuboring.")
@@ -451,7 +516,7 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await state.set_state(AdminStates.waiting_for_test_delete)
             await callback.message.answer(f"{format_tests(await get_all_tests(session))}\n\nO'chirish uchun test ID yuboring.")
         elif action == "content":
-            await callback.message.edit_text("Nizom va kitoblar boshqaruvi:", reply_markup=admin_content_keyboard())
+            await safe_edit_text(callback.message, "Nizom va kitoblar boshqaruvi:", reply_markup=admin_content_keyboard())
         elif action == "add_rule":
             await state.update_data(content_kind="rule")
             await state.set_state(AdminStates.waiting_for_content_title)
@@ -461,9 +526,9 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await state.set_state(AdminStates.waiting_for_content_title)
             await callback.message.answer("Kitob sarlavhasini yuboring.")
         elif action == "list_rules":
-            await callback.message.edit_text(format_content(await get_all_rules(session), "Nizomlar"), reply_markup=admin_content_keyboard())
+            await safe_edit_text(callback.message, format_content(await get_all_rules(session), "Nizomlar"), reply_markup=admin_content_keyboard())
         elif action == "list_books":
-            await callback.message.edit_text(format_content(await get_all_books(session), "Kitoblar"), reply_markup=admin_content_keyboard())
+            await safe_edit_text(callback.message, format_content(await get_all_books(session), "Kitoblar"), reply_markup=admin_content_keyboard())
         elif action == "delete_rule":
             await state.update_data(content_kind="rule")
             await state.set_state(AdminStates.waiting_for_content_delete)
@@ -473,13 +538,13 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await state.set_state(AdminStates.waiting_for_content_delete)
             await callback.message.answer(f"{format_content(await get_all_books(session), 'Kitoblar')}\n\nO'chirish uchun ID yuboring.")
         elif action == "broadcast":
-            await callback.message.edit_text("Broadcast boshqaruvi:", reply_markup=admin_broadcast_keyboard())
+            await safe_edit_text(callback.message, "Broadcast boshqaruvi:", reply_markup=admin_broadcast_keyboard())
         elif action == "referral_text":
             current_text = await get_referral_share_text(session)
-            await state.set_state(AdminStates.waiting_for_referral_text)
+            await state.set_state(AdminStates.waiting_for_referral_content)
             preview = current_text or "Hozircha alohida izoh yo'q."
             await callback.message.answer(
-                "Referral havola ostidagi izohni yuboring.\n`yo'q` yuborsangiz izoh o'chiriladi.\n\n"
+                "🖼 Referral izohi uchun matn yoki rasm+caption yuboring.\n`yo'q` yuborsangiz izoh va rasm o'chiriladi.\n\n"
                 f"Joriy izoh:\n{preview}"
             )
         elif action == "broadcast_now":
@@ -491,9 +556,59 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await state.set_state(AdminStates.waiting_for_broadcast_message)
             await callback.message.answer("Rejalashtiriladigan broadcast matnini yuboring.")
         elif action == "list_broadcasts":
-            await callback.message.edit_text(format_broadcasts(await get_all_broadcasts(session)), reply_markup=admin_broadcast_keyboard())
+            await safe_edit_text(callback.message, format_broadcasts(await get_all_broadcasts(session)), reply_markup=admin_broadcast_keyboard())
 
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:test_more")
+async def admin_test_more_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.message or not is_admin(callback.from_user.id):
+        return
+    await state.set_state(AdminStates.waiting_for_test_question_text)
+    data = await state.get_data()
+    next_index = len(data.get("questions", [])) + 1
+    await callback.message.answer(f"❓ {next_index}-savol matnini yuboring.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:test_finish")
+async def admin_test_finish_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.message or not is_admin(callback.from_user.id):
+        return
+    data = await state.get_data()
+    questions = list(data.get("questions", []))
+    if not questions:
+        await callback.answer("Kamida bitta savol qo'shing.", show_alert=True)
+        return
+    scheduled_end_at = datetime.fromisoformat(data["scheduled_end_at"]) if data.get("scheduled_end_at") else None
+    async with AsyncSessionLocal() as session:
+        try:
+            test = await create_test(
+                session,
+                title=data["title"],
+                test_code=data["test_code"],
+                min_referrals=int(data["min_referrals"]),
+                question_time_limit=int(data["question_time_limit"]),
+                created_by_telegram_id=callback.from_user.id,
+                scheduled_end_at=scheduled_end_at,
+                questions_payload=questions,
+            )
+        except Exception as exc:
+            await callback.message.answer(f"❌ Test yaratilmadi: {exc}")
+            await callback.answer()
+            return
+    await state.clear()
+    await callback.message.answer(
+        "🎉 Test yaratildi!\n"
+        f"📝 Nomi: {test.title}\n"
+        f"🆔 Test ID: {test.test_code}\n"
+        f"❓ Savollar: {len(test.questions)}\n"
+        f"🤝 Min referral: {test.min_referrals}\n"
+        f"⏱ Har savol: {test.question_time_limit} soniya",
+        reply_markup=admin_panel_keyboard(),
+    )
+    await callback.answer("Test saqlandi ✅")
 
 
 @router.message(AdminStates.waiting_for_channel_create)
@@ -538,19 +653,26 @@ async def admin_channel_delete_handler(message: Message, state: FSMContext) -> N
     await message.answer("Kanal o'chirildi.", reply_markup=admin_panel_keyboard())
 
 
-@router.message(AdminStates.waiting_for_referral_text)
-async def admin_referral_text_handler(message: Message, state: FSMContext) -> None:
-    if not message.from_user or not message.text or not is_admin(message.from_user.id):
+@router.message(AdminStates.waiting_for_referral_content)
+async def admin_referral_content_handler(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not message.from_user or not is_admin(message.from_user.id):
         return
-    raw_text = message.text.strip()
-    text = None if raw_text.lower() in {"yo'q", "yoq", "none", "no", "-"} else raw_text
-    async with AsyncSessionLocal() as session:
-        await set_referral_share_text(session, text)
-    await state.clear()
-    if text:
-        await message.answer("Referral izohi saqlandi.", reply_markup=admin_panel_keyboard())
+    raw_text = (message.text or message.caption or "").strip()
+    if raw_text.lower() in {"yo'q", "yoq", "none", "no", "-"}:
+        text = None
+        media_path = None
     else:
-        await message.answer("Referral izohi o'chirildi.", reply_markup=admin_panel_keyboard())
+        text = raw_text or None
+        media_path = None
+        if message.photo:
+            media_path = await save_bot_file(bot, message.photo[-1].file_id, "referral", ".jpg")
+    async with AsyncSessionLocal() as session:
+        await set_referral_share_content(session, text=text, media_path=media_path)
+    await state.clear()
+    if text or media_path:
+        await message.answer("✅ Referral izohi saqlandi.", reply_markup=admin_panel_keyboard())
+    else:
+        await message.answer("🗑 Referral izohi o'chirildi.", reply_markup=admin_panel_keyboard())
 
 
 @router.message(AdminStates.waiting_for_test_title)
@@ -559,7 +681,7 @@ async def admin_test_title_handler(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(title=message.text.strip())
     await state.set_state(AdminStates.waiting_for_test_code)
-    await message.answer("Test ID ni yuboring. Masalan: 1234")
+    await message.answer("🆔 Test ID ni yuboring. Masalan: 1234")
 
 
 @router.message(AdminStates.waiting_for_test_code)
@@ -568,7 +690,7 @@ async def admin_test_code_handler(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(test_code=message.text.strip().upper())
     await state.set_state(AdminStates.waiting_for_test_min_referrals)
-    await message.answer("Test uchun minimal referral sonini yuboring.")
+    await message.answer("🤝 Test uchun minimal referral sonini yuboring.")
 
 
 @router.message(AdminStates.waiting_for_test_min_referrals)
@@ -581,8 +703,25 @@ async def admin_test_min_referrals_handler(message: Message, state: FSMContext) 
         await message.answer("Referral soni butun son bo'lishi kerak.")
         return
     await state.update_data(min_referrals=min_referrals)
+    await state.set_state(AdminStates.waiting_for_test_time_limit)
+    await message.answer("⏱ Har bir savol uchun vaqtni soniyada yuboring. Masalan: 30")
+
+
+@router.message(AdminStates.waiting_for_test_time_limit)
+async def admin_test_time_limit_handler(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not message.text or not is_admin(message.from_user.id):
+        return
+    try:
+        question_time_limit = int(message.text.strip())
+    except ValueError:
+        await message.answer("Vaqt butun son bo'lishi kerak.")
+        return
+    if question_time_limit < 5 or question_time_limit > 600:
+        await message.answer("Vaqt 5 dan 600 soniyagacha bo'lishi kerak.")
+        return
+    await state.update_data(question_time_limit=question_time_limit)
     await state.set_state(AdminStates.waiting_for_test_end_at)
-    await message.answer("Tugash vaqtini `YYYY-MM-DD HH:MM` formatida yuboring. Kerak bo'lmasa `yo'q` yuboring.")
+    await message.answer("📅 Tugash vaqtini `YYYY-MM-DD HH:MM` formatida yuboring. Kerak bo'lmasa `yo'q` yuboring.")
 
 
 @router.message(AdminStates.waiting_for_test_end_at)
@@ -595,36 +734,62 @@ async def admin_test_end_at_handler(message: Message, state: FSMContext) -> None
         await message.answer("Vaqt formati xato. `YYYY-MM-DD HH:MM` ko'rinishida yuboring yoki `yo'q` deb yozing.")
         return
     await state.update_data(scheduled_end_at=scheduled_end_at.isoformat() if scheduled_end_at else "")
-    await state.set_state(AdminStates.waiting_for_test_answer_key)
+    await state.update_data(questions=[])
+    await state.set_state(AdminStates.waiting_for_test_question_text)
+    await message.answer("❓ 1-savol matnini yuboring.")
+
+
+@router.message(AdminStates.waiting_for_test_question_text)
+async def admin_test_question_text_handler(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not message.text or not is_admin(message.from_user.id):
+        return
+    await state.update_data(current_question_text=message.text.strip())
+    await state.set_state(AdminStates.waiting_for_test_options)
+    await message.answer("🔤 4 ta variantni yuboring.\nFormat: Variant 1 | Variant 2 | Variant 3 | Variant 4")
+
+
+@router.message(AdminStates.waiting_for_test_options)
+async def admin_test_options_handler(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not message.text or not is_admin(message.from_user.id):
+        return
+    try:
+        options = parse_test_options(message.text.strip())
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(current_options=options)
+    await state.set_state(AdminStates.waiting_for_test_correct_option)
     await message.answer(
-        "Javob kalitini yuboring.\nMisollar:\nABCDA\n1a2b3c4d5a\nA B C D A"
+        "✅ To'g'ri javob raqamini yuboring.\n1, 2, 3 yoki 4\n\n"
+        f"1. {options[0]}\n2. {options[1]}\n3. {options[2]}\n4. {options[3]}"
     )
 
 
-@router.message(AdminStates.waiting_for_test_answer_key)
-async def admin_test_answer_key_handler(message: Message, state: FSMContext) -> None:
+@router.message(AdminStates.waiting_for_test_correct_option)
+async def admin_test_correct_option_handler(message: Message, state: FSMContext) -> None:
     if not message.from_user or not message.text or not is_admin(message.from_user.id):
         return
+    try:
+        correct_index = int(message.text.strip()) - 1
+    except ValueError:
+        await message.answer("To'g'ri javob 1, 2, 3 yoki 4 bo'lishi kerak.")
+        return
+    if correct_index not in range(4):
+        await message.answer("To'g'ri javob 1, 2, 3 yoki 4 bo'lishi kerak.")
+        return
     data = await state.get_data()
-    scheduled_end_at = datetime.fromisoformat(data["scheduled_end_at"]) if data.get("scheduled_end_at") else None
-    async with AsyncSessionLocal() as session:
-        try:
-            test = await create_test(
-                session,
-                title=data["title"],
-                test_code=data["test_code"],
-                answer_key=message.text,
-                min_referrals=int(data["min_referrals"]),
-                created_by_telegram_id=message.from_user.id,
-                scheduled_end_at=scheduled_end_at,
-            )
-        except Exception as exc:
-            await message.answer(f"Test yaratilmadi: {exc}")
-            return
-    await state.clear()
+    questions = list(data.get("questions", []))
+    questions.append(
+        {
+            "text": data["current_question_text"],
+            "options": data["current_options"],
+            "correct_index": correct_index,
+        }
+    )
+    await state.update_data(questions=questions, current_question_text=None, current_options=None)
     await message.answer(
-        f"Test yaratildi: {test.title}\nID: {test.test_code}\nSavollar soni: {len(test.answer_key)}",
-        reply_markup=admin_panel_keyboard(),
+        f"✅ {len(questions)}-savol saqlandi.\n\n{format_test_builder_summary({**data, 'questions': questions})}",
+        reply_markup=admin_test_builder_keyboard(),
     )
 
 
@@ -768,47 +933,57 @@ async def admin_broadcast_schedule_handler(message: Message, state: FSMContext) 
     await message.answer("Scheduled broadcast saqlandi.", reply_markup=admin_panel_keyboard())
 
 
-@router.message(StateFilter(None), F.text.regexp(r".+\*.+"))
-async def test_submission_handler(message: Message, bot: Bot, state: FSMContext) -> None:
-    if not message.from_user or not message.text:
+@router.callback_query(F.data.startswith("quiz_start:"))
+async def quiz_start_callback(callback: CallbackQuery, bot: Bot, state: FSMContext) -> None:
+    if not callback.from_user or not callback.message:
         return
-    ready = await ensure_user_ready(message, bot, state)
+    fake_message = callback.message
+    ready = await ensure_user_ready(fake_message, bot, state)
     if not ready:
+        await callback.answer()
         return
 
-    try:
-        test_code, answers = parse_submission_text(message.text.strip())
-    except ValueError:
-        return
-
+    test_id = int(callback.data.split(":", 1)[1])
     async with AsyncSessionLocal() as session:
-        user = await get_user_by_telegram_id(session, message.from_user.id)
+        user = await get_user_by_telegram_id(session, callback.from_user.id)
         if user is None:
+            await callback.answer()
             return
-        test = await get_test_by_code(session, test_code)
-        if test is None:
-            await message.answer("Test ID topilmadi yoki test yopilgan.")
+        test = await get_test_by_id(session, test_id)
+        if test is None or not test.is_active or test.closed_at is not None or (test.scheduled_end_at and test.scheduled_end_at <= datetime.now(timezone.utc)):
+            await callback.message.answer("❌ Test topilmadi yoki yopilgan.")
+            await callback.answer()
             return
         if not user_can_take_test(user, test):
-            await message.answer(
-                t(user.language, "test_locked", minimum=test.min_referrals, count=user.invited_users_count),
+            await callback.message.answer(
+                f"🚫 {t(user.language, 'test_locked', minimum=test.min_referrals, count=user.invited_users_count)}",
                 reply_markup=main_menu_keyboard(user.language),
             )
+            await callback.answer()
             return
         attempt = await get_or_create_attempt(session, user, test)
         if attempt.status == "completed":
-            await message.answer("Siz bu testni allaqachon topshirgansiz.")
+            await callback.message.answer("♻️ Siz bu testni allaqachon ishlab bo'lgansiz.")
+            await callback.answer()
             return
-        try:
-            submitted = await submit_attempt_by_letters(session, attempt, answers)
-        except ValueError as exc:
-            await message.answer(str(exc))
+        if attempt.active_polls:
+            await callback.message.answer("⏳ Sizga savol yuborilgan. Avval o'sha savolga javob bering.")
+            await callback.answer()
             return
+        await callback.message.answer(
+            f"🚀 <b>{test.title}</b> testi boshlandi.\n"
+            f"⏱ Har savol uchun {test.question_time_limit} soniya.\n"
+            "🔀 Savollar va variantlar aralash tartibda keladi.",
+            reply_markup=main_menu_keyboard(user.language),
+        )
+        await start_quiz_attempt(session, bot, attempt)
+    await callback.answer("Test boshlandi ✅")
 
-    await message.answer(
-        f"Javoblar qabul qilindi.\nTest: {submitted.test.title}\nNatija: {submitted.score}/{submitted.total_questions}",
-        reply_markup=main_menu_keyboard(user.language),
-    )
+
+@router.poll_answer()
+async def poll_answer_handler(answer: PollAnswer, bot: Bot) -> None:
+    async with AsyncSessionLocal() as session:
+        await handle_poll_answer(session, bot, answer)
 
 
 @router.message(StateFilter(None), F.text)
@@ -828,23 +1003,25 @@ async def menu_handler(message: Message, state: FSMContext, bot: Bot) -> None:
             user = await get_user_by_telegram_id(session, message.from_user.id)
             settings = get_settings()
             link = f"https://t.me/{settings.bot_username}?start={user.referral_code}"
-            test_score = await get_total_test_score(session, user.id)
             custom_caption = await get_referral_share_text(session)
+            custom_media = await get_referral_share_media_path(session)
             invite_text = t(
                 user.language,
                 "invite_text",
                 link=link,
                 count=user.invited_users_count,
                 score=user.referral_score,
-                total=user.referral_score + test_score,
             )
             if custom_caption:
                 invite_text = f"{invite_text}\n\n{t(user.language, 'invite_share_caption', caption=custom_caption)}"
             share_text = custom_caption or t(user.language, "invite_share_default")
             share_url = build_referral_share_url(link, share_text)
-            await message.answer(invite_text, reply_markup=main_menu_keyboard(user.language))
+            if custom_media and Path(custom_media).exists():
+                await message.answer_photo(FSInputFile(custom_media), caption=invite_text, reply_markup=main_menu_keyboard(user.language))
+            else:
+                await message.answer(invite_text, reply_markup=main_menu_keyboard(user.language))
             await message.answer(
-                t(user.language, "invite_share_prompt"),
+                f"📨 {t(user.language, 'invite_share_prompt')}",
                 reply_markup=referral_share_keyboard(share_url, t(user.language, "invite_share_button")),
             )
         return
@@ -856,25 +1033,47 @@ async def menu_handler(message: Message, state: FSMContext, bot: Bot) -> None:
     async with AsyncSessionLocal() as session:
         user = await get_user_by_telegram_id(session, message.from_user.id)
         if menu_key == "test":
-            if user.invited_users_count < MIN_REFERRALS_FOR_TEST:
-                await message.answer(
-                    t(user.language, "test_locked", minimum=MIN_REFERRALS_FOR_TEST, count=user.invited_users_count),
-                    reply_markup=main_menu_keyboard(user.language),
-                )
+            tests = await get_active_tests(session)
+            if not tests:
+                await message.answer("🛑 Hozircha faol test yo'q.", reply_markup=main_menu_keyboard(user.language))
                 return
-            await message.answer(t(user.language, "test_open_prompt"))
+            available = []
+            blocked_messages = []
+            for test in tests:
+                if user_can_take_test(user, test):
+                    available.append(
+                        {
+                            "id": test.id,
+                            "text": f"📝 {test.title} | ID: {test.test_code} | ⏱ {test.question_time_limit}s",
+                        }
+                    )
+                else:
+                    blocked_messages.append(
+                        f"🔒 {test.title}: kamida {test.min_referrals} ta referral kerak. Sizda {user.invited_users_count} ta."
+                    )
+            if available:
+                await message.answer(
+                    "🧪 Testni tanlang. Savollar ketma-ket quiz ko'rinishida keladi:",
+                    reply_markup=test_selection_keyboard(available),
+                )
+            if blocked_messages:
+                await message.answer("\n".join(blocked_messages), reply_markup=main_menu_keyboard(user.language))
             return
         if menu_key == "results":
-            rankings = await get_user_rankings(session)
-            my_rank = next((item for item in rankings if item["user_id"] == user.id), None)
-            leader = rankings[0] if rankings else None
+            test_rankings = await get_test_rankings(session)
+            referral_rankings = await get_referral_rankings(session)
+            my_test_rank = next((item for item in test_rankings if item["user_id"] == user.id), None)
+            my_referral_rank = next((item for item in referral_rankings if item["user_id"] == user.id), None)
+            test_leader = test_rankings[0] if test_rankings else None
+            referral_leader = referral_rankings[0] if referral_rankings else None
             test_score = await get_total_test_score(session, user.id)
             await message.answer(
                 format_results_message(
                     user.language,
-                    my_rank=my_rank,
-                    leader=leader,
-                    total_score=test_score + user.referral_score,
+                    my_test_rank=my_test_rank,
+                    test_leader=test_leader,
+                    my_referral_rank=my_referral_rank,
+                    referral_leader=referral_leader,
                     test_score=test_score,
                     referral_score=user.referral_score,
                 ),
@@ -882,8 +1081,10 @@ async def menu_handler(message: Message, state: FSMContext, bot: Bot) -> None:
             )
             return
         if menu_key == "cabinet":
-            rankings = await get_user_rankings(session)
-            my_rank = next((item for item in rankings if item["user_id"] == user.id), None)
+            test_rankings = await get_test_rankings(session)
+            referral_rankings = await get_referral_rankings(session)
+            my_test_rank = next((item for item in test_rankings if item["user_id"] == user.id), None)
+            my_referral_rank = next((item for item in referral_rankings if item["user_id"] == user.id), None)
             test_score = await get_total_test_score(session, user.id)
             stmt = (
                 select(TestAttempt)
@@ -898,8 +1099,8 @@ async def menu_handler(message: Message, state: FSMContext, bot: Bot) -> None:
                     user.language,
                     user=user,
                     test_score=test_score,
-                    total_score=test_score + user.referral_score,
-                    my_rank=my_rank,
+                    my_test_rank=my_test_rank,
+                    my_referral_rank=my_referral_rank,
                     attempts=attempts,
                 ),
                 reply_markup=main_menu_keyboard(user.language),
@@ -908,24 +1109,32 @@ async def menu_handler(message: Message, state: FSMContext, bot: Bot) -> None:
         if menu_key == "rules":
             rules = await get_active_rules(session)
             if not rules:
-                await message.answer(t(user.language, "rules_empty"))
+                await message.answer(f"📘 {t(user.language, 'rules_empty')}")
                 return
             for rule in rules:
-                await message.answer(f"{rule.title}\n\n{rule.content}")
-                if rule.media_path:
-                    await send_attachment(message, rule.media_path)
+                text = f"📘 <b>{escape(rule.title)}</b>\n\n{escape(rule.content)}"
+                if rule.media_path and Path(rule.media_path).exists() and Path(rule.media_path).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+                    await message.answer_photo(FSInputFile(rule.media_path), caption=text)
+                else:
+                    await message.answer(text)
+                    if rule.media_path:
+                        await send_attachment(message, rule.media_path)
                 if rule.file_path:
                     await send_attachment(message, rule.file_path)
             return
         if menu_key == "books":
             books = await get_active_books(session)
             if not books:
-                await message.answer(t(user.language, "books_empty"))
+                await message.answer(f"📚 {t(user.language, 'books_empty')}")
                 return
             for book in books:
-                await message.answer(f"{book.title}\n\n{book.content}")
-                if book.media_path:
-                    await send_attachment(message, book.media_path)
+                text = f"📚 <b>{escape(book.title)}</b>\n\n{escape(book.content)}"
+                if book.media_path and Path(book.media_path).exists() and Path(book.media_path).suffix.lower() in {'.jpg', '.jpeg', '.png', '.webp'}:
+                    await message.answer_photo(FSInputFile(book.media_path), caption=text)
+                else:
+                    await message.answer(text)
+                    if book.media_path:
+                        await send_attachment(message, book.media_path)
                 if book.file_path:
                     await send_attachment(message, book.file_path)
             return

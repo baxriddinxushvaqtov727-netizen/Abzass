@@ -160,3 +160,19 @@ def referral_share_keyboard(share_url: str, button_text: str) -> InlineKeyboardM
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=button_text, url=share_url)]]
     )
+
+
+def admin_test_builder_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="➕ Yana savol", callback_data="admin:test_more"),
+                InlineKeyboardButton(text="✅ Testni yakunlash", callback_data="admin:test_finish"),
+            ]
+        ]
+    )
+
+
+def test_selection_keyboard(tests: list[dict]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=item["text"], callback_data=f"quiz_start:{item['id']}")] for item in tests]
+    return InlineKeyboardMarkup(inline_keyboard=rows)

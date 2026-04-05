@@ -18,13 +18,16 @@ class RegistrationStates(StatesGroup):
 class AdminStates(StatesGroup):
     waiting_for_channel_create = State()
     waiting_for_channel_delete = State()
-    waiting_for_referral_text = State()
+    waiting_for_referral_content = State()
 
     waiting_for_test_title = State()
     waiting_for_test_code = State()
     waiting_for_test_min_referrals = State()
+    waiting_for_test_time_limit = State()
     waiting_for_test_end_at = State()
-    waiting_for_test_answer_key = State()
+    waiting_for_test_question_text = State()
+    waiting_for_test_options = State()
+    waiting_for_test_correct_option = State()
     waiting_for_test_close = State()
     waiting_for_test_delete = State()
 
