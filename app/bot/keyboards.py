@@ -2,6 +2,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    KeyboardButtonPollType,
     ReplyKeyboardMarkup,
 )
 
@@ -33,7 +34,20 @@ def phone_keyboard() -> ReplyKeyboardMarkup:
 
 
 def main_menu_keyboard(language: str) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text=button)] for button in menu_texts(language).values()]
+    labels = menu_texts(language)
+    rows = [
+        [
+            KeyboardButton(text=labels["cabinet"]),
+            KeyboardButton(text=labels["invite"]),
+            KeyboardButton(text=labels["test"]),
+        ],
+        [
+            KeyboardButton(text=labels["results"]),
+            KeyboardButton(text=labels["rules"]),
+            KeyboardButton(text=labels["books"]),
+        ],
+        [KeyboardButton(text=labels["question"])],
+    ]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 def admin_ticket_actions(ticket_id: int) -> InlineKeyboardMarkup:
@@ -166,8 +180,8 @@ def admin_test_builder_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="➕ Yana savol", callback_data="admin:test_more"),
-                InlineKeyboardButton(text="✅ Testni yakunlash", callback_data="admin:test_finish"),
+                InlineKeyboardButton(text="➕ Yana savol", callback_data="test_more"),
+                InlineKeyboardButton(text="✅ Testni yakunlash", callback_data="test_finish"),
             ]
         ]
     )
@@ -176,3 +190,13 @@ def admin_test_builder_keyboard() -> InlineKeyboardMarkup:
 def test_selection_keyboard(tests: list[dict]) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=item["text"], callback_data=f"quiz_start:{item['id']}")] for item in tests]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_quiz_poll_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🧪 Quiz savol yuborish", request_poll=KeyboardButtonPollType(type="quiz"))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )

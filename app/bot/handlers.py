@@ -27,6 +27,7 @@ from app.bot.keyboards import (
     admin_channels_keyboard,
     admin_content_keyboard,
     admin_panel_keyboard,
+    admin_quiz_poll_keyboard,
     admin_ticket_actions,
     admin_test_builder_keyboard,
     admin_tests_keyboard,
@@ -561,18 +562,21 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
     await callback.answer()
 
 
-@router.callback_query(F.data == "admin:test_more")
+@router.callback_query(F.data == "test_more")
 async def admin_test_more_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.from_user or not callback.message or not is_admin(callback.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_test_question_text)
     data = await state.get_data()
     next_index = len(data.get("questions", [])) + 1
-    await callback.message.answer(f"❓ {next_index}-savol matnini yuboring.")
+    await callback.message.answer(
+        f"🧪 {next_index}-savol uchun quiz poll yuboring.",
+        reply_markup=admin_quiz_poll_keyboard(),
+    )
     await callback.answer()
 
 
-@router.callback_query(F.data == "admin:test_finish")
+@router.callback_query(F.data == "test_finish")
 async def admin_test_finish_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.from_user or not callback.message or not is_admin(callback.from_user.id):
         return
@@ -736,59 +740,57 @@ async def admin_test_end_at_handler(message: Message, state: FSMContext) -> None
     await state.update_data(scheduled_end_at=scheduled_end_at.isoformat() if scheduled_end_at else "")
     await state.update_data(questions=[])
     await state.set_state(AdminStates.waiting_for_test_question_text)
-    await message.answer("❓ 1-savol matnini yuboring.")
+    await message.answer(
+        "🧪 1-savol uchun native quiz poll yuboring.\n"
+        "Pastdagi tugmani bossangiz Telegram quiz oynasi ochiladi.",
+        reply_markup=admin_quiz_poll_keyboard(),
+    )
 
 
 @router.message(AdminStates.waiting_for_test_question_text)
 async def admin_test_question_text_handler(message: Message, state: FSMContext) -> None:
-    if not message.from_user or not message.text or not is_admin(message.from_user.id):
+    if not message.from_user or not is_admin(message.from_user.id):
         return
-    await state.update_data(current_question_text=message.text.strip())
-    await state.set_state(AdminStates.waiting_for_test_options)
-    await message.answer("🔤 4 ta variantni yuboring.\nFormat: Variant 1 | Variant 2 | Variant 3 | Variant 4")
-
-
-@router.message(AdminStates.waiting_for_test_options)
-async def admin_test_options_handler(message: Message, state: FSMContext) -> None:
-    if not message.from_user or not message.text or not is_admin(message.from_user.id):
+    if not message.poll:
+        await message.answer(
+            "❌ Bu bosqichda quiz poll yuborilishi kerak.\n"
+            "Pastdagi tugmani bosib Telegram quiz oynasini oching.",
+            reply_markup=admin_quiz_poll_keyboard(),
+        )
         return
-    try:
-        options = parse_test_options(message.text.strip())
-    except ValueError as exc:
-        await message.answer(str(exc))
+    if message.poll.type != "quiz":
+        await message.answer("❌ Oddiy poll emas, aynan quiz poll yuboring.", reply_markup=admin_quiz_poll_keyboard())
         return
-    await state.update_data(current_options=options)
-    await state.set_state(AdminStates.waiting_for_test_correct_option)
-    await message.answer(
-        "✅ To'g'ri javob raqamini yuboring.\n1, 2, 3 yoki 4\n\n"
-        f"1. {options[0]}\n2. {options[1]}\n3. {options[2]}\n4. {options[3]}"
-    )
-
-
-@router.message(AdminStates.waiting_for_test_correct_option)
-async def admin_test_correct_option_handler(message: Message, state: FSMContext) -> None:
-    if not message.from_user or not message.text or not is_admin(message.from_user.id):
+    if len(message.poll.options) != 4:
+        await message.answer("❌ Quiz poll aynan 4 ta variantdan iborat bo'lishi kerak.", reply_markup=admin_quiz_poll_keyboard())
         return
-    try:
-        correct_index = int(message.text.strip()) - 1
-    except ValueError:
-        await message.answer("To'g'ri javob 1, 2, 3 yoki 4 bo'lishi kerak.")
-        return
-    if correct_index not in range(4):
-        await message.answer("To'g'ri javob 1, 2, 3 yoki 4 bo'lishi kerak.")
+    correct_index = message.poll.correct_option_id
+    if correct_index is None or correct_index not in range(4):
+        await message.answer("❌ To'g'ri javob belgilangan quiz poll yuboring.", reply_markup=admin_quiz_poll_keyboard())
         return
     data = await state.get_data()
     questions = list(data.get("questions", []))
+    options = [option.text.strip() for option in message.poll.options]
     questions.append(
         {
-            "text": data["current_question_text"],
-            "options": data["current_options"],
+            "text": message.poll.question.strip(),
+            "options": options,
             "correct_index": correct_index,
         }
     )
-    await state.update_data(questions=questions, current_question_text=None, current_options=None)
+    await state.update_data(questions=questions)
+    preview = "\n".join(
+        [
+            f"❓ {questions[-1]['text']}",
+            f"1. {options[0]}",
+            f"2. {options[1]}",
+            f"3. {options[2]}",
+            f"4. {options[3]}",
+            f"✅ To'g'ri javob: {correct_index + 1}",
+        ]
+    )
     await message.answer(
-        f"✅ {len(questions)}-savol saqlandi.\n\n{format_test_builder_summary({**data, 'questions': questions})}",
+        f"✅ {len(questions)}-savol saqlandi.\n\n{preview}\n\n{format_test_builder_summary({**data, 'questions': questions})}",
         reply_markup=admin_test_builder_keyboard(),
     )
 
