@@ -94,7 +94,6 @@ async def complete_profile(
     patronymic: str,
     region: str,
     district: str,
-    school_class: int,
 ) -> User:
     if user.profile is None:
         profile = UserProfile(
@@ -104,7 +103,6 @@ async def complete_profile(
             patronymic=patronymic,
             region=region,
             district=district,
-            school_class=school_class,
         )
         session.add(profile)
         user.profile = profile
@@ -114,7 +112,6 @@ async def complete_profile(
         user.profile.patronymic = patronymic
         user.profile.region = region
         user.profile.district = district
-        user.profile.school_class = school_class
 
     previously_completed = user.is_profile_completed
     user.is_profile_completed = True

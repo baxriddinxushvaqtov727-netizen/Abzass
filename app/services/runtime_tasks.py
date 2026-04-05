@@ -15,8 +15,8 @@ async def scheduler_loop(poll_interval: int = 20) -> None:
         while True:
             async with AsyncSessionLocal() as session:
                 await run_due_broadcasts(session, bot)
-                await process_expired_quiz_polls(session, bot)
                 await close_due_tests(session, bot)
+                await process_expired_quiz_polls(session, bot)
             await asyncio.sleep(poll_interval)
     except asyncio.CancelledError:
         raise

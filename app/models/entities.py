@@ -53,7 +53,6 @@ class UserProfile(TimestampMixin, Base):
     patronymic: Mapped[str] = mapped_column(String(255))
     region: Mapped[str] = mapped_column(String(255))
     district: Mapped[str] = mapped_column(String(255))
-    school_class: Mapped[int] = mapped_column(Integer)
 
     user: Mapped["User"] = relationship(back_populates="profile")
 

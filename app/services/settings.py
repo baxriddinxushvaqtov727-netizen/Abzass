@@ -32,10 +32,12 @@ async def set_referral_share_content(
     *,
     text: str | None,
     media_path: str | None,
+    replace_media: bool = False,
 ) -> BotConfig:
     config = await get_or_create_bot_config(session)
     config.referral_share_text = text.strip() if text else None
-    config.referral_share_media_path = media_path
+    if replace_media:
+        config.referral_share_media_path = media_path
     await session.commit()
     await session.refresh(config)
     return config

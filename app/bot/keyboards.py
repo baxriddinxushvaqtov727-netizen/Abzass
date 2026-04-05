@@ -43,10 +43,13 @@ def main_menu_keyboard(language: str) -> ReplyKeyboardMarkup:
         ],
         [
             KeyboardButton(text=labels["results"]),
+            KeyboardButton(text=labels["leaderboard"]),
             KeyboardButton(text=labels["rules"]),
-            KeyboardButton(text=labels["books"]),
         ],
-        [KeyboardButton(text=labels["question"])],
+        [
+            KeyboardButton(text=labels["books"]),
+            KeyboardButton(text=labels["question"]),
+        ],
     ]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
@@ -150,19 +153,6 @@ def regions_keyboard() -> InlineKeyboardMarkup:
     for region in REGIONS.keys():
         current_row.append(InlineKeyboardButton(text=region, callback_data=f"reg_region:{region}"))
         if len(current_row) == 2:
-            rows.append(current_row)
-            current_row = []
-    if current_row:
-        rows.append(current_row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def classes_keyboard() -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    current_row: list[InlineKeyboardButton] = []
-    for class_no in range(1, 12):
-        current_row.append(InlineKeyboardButton(text=str(class_no), callback_data=f"reg_class:{class_no}"))
-        if len(current_row) == 4:
             rows.append(current_row)
             current_row = []
     if current_row:

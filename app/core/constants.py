@@ -226,6 +226,7 @@ MENU_KEYS = [
     "invite",
     "test",
     "results",
+    "leaderboard",
     "rules",
     "books",
     "question",

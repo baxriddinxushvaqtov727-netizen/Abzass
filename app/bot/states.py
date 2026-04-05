@@ -12,7 +12,6 @@ class RegistrationStates(StatesGroup):
     waiting_for_patronymic = State()
     waiting_for_region = State()
     waiting_for_district = State()
-    waiting_for_school_class = State()
 
 
 class AdminStates(StatesGroup):

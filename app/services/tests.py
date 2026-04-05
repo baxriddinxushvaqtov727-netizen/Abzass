@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from aiogram import Bot
 from aiogram.enums import PollType
 from aiogram.types import PollAnswer
-from sqlalchemy import Select, delete, func, select
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -279,6 +279,8 @@ async def _finalize_attempt(session: AsyncSession, attempt: TestAttempt) -> Test
 
 
 async def _send_current_question(session: AsyncSession, bot: Bot, attempt: TestAttempt) -> TestAttempt:
+    if not is_test_open(attempt.test):
+        return await _finalize_attempt(session, attempt)
     question = _get_current_question(attempt)
     if question is None:
         return await _finalize_attempt(session, attempt)
@@ -365,6 +367,15 @@ async def _resolve_poll_answer(
     active_poll: ActiveQuizPoll,
     chosen_option_index: int | None,
 ) -> TestAttempt:
+    claim_result = await session.execute(
+        update(ActiveQuizPoll)
+        .where(ActiveQuizPoll.id == active_poll.id, ActiveQuizPoll.is_processed.is_(False))
+        .values(is_processed=True)
+    )
+    await session.commit()
+    if not claim_result.rowcount:
+        raise ValueError("Poll allaqachon qayta ishlangan.")
+
     attempt = await get_attempt(session, active_poll.attempt_id)
     if attempt is None:
         await session.execute(delete(ActiveQuizPoll).where(ActiveQuizPoll.id == active_poll.id))
@@ -404,8 +415,13 @@ async def handle_poll_answer(session: AsyncSession, bot: Bot, answer: PollAnswer
         return None
 
     chosen_index = answer.option_ids[0] if answer.option_ids else None
-    attempt = await _resolve_poll_answer(session, active_poll=active_poll, chosen_option_index=chosen_index)
+    try:
+        attempt = await _resolve_poll_answer(session, active_poll=active_poll, chosen_option_index=chosen_index)
+    except ValueError:
+        return None
     if attempt.status == AttemptStatus.COMPLETED.value:
+        return await finish_attempt_and_notify(session, bot, attempt.id)
+    if not is_test_open(attempt.test):
         return await finish_attempt_and_notify(session, bot, attempt.id)
     return await _send_current_question(session, bot, attempt)
 
@@ -420,8 +436,13 @@ async def process_expired_quiz_polls(session: AsyncSession, bot: Bot) -> int:
     expired_polls = list((await session.scalars(stmt)).all())
     processed = 0
     for active_poll in expired_polls:
-        attempt = await _resolve_poll_answer(session, active_poll=active_poll, chosen_option_index=None)
+        try:
+            attempt = await _resolve_poll_answer(session, active_poll=active_poll, chosen_option_index=None)
+        except ValueError:
+            continue
         if attempt.status == AttemptStatus.COMPLETED.value:
+            await finish_attempt_and_notify(session, bot, attempt.id)
+        elif not is_test_open(attempt.test):
             await finish_attempt_and_notify(session, bot, attempt.id)
         else:
             await _send_current_question(session, bot, attempt)
@@ -463,6 +484,39 @@ async def get_test_rankings(session: AsyncSession) -> list[dict]:
                 "first_name": row.first_name,
                 "last_name": row.last_name,
                 "test_score": int(row.test_score or 0),
+            }
+        )
+    for index, item in enumerate(rankings, start=1):
+        item["rank"] = index
+        item["display_name"] = (f"{item['first_name'] or ''} {item['last_name'] or ''}").strip() or str(item["telegram_id"])
+    return rankings
+
+
+async def get_rankings_for_single_test(session: AsyncSession, test_id: int) -> list[dict]:
+    stmt = (
+        select(
+            User.id,
+            User.telegram_id,
+            UserProfile.first_name,
+            UserProfile.last_name,
+            TestAttempt.score,
+            TestAttempt.completed_at,
+        )
+        .join(TestAttempt, (TestAttempt.user_id == User.id) & (TestAttempt.status == AttemptStatus.COMPLETED.value))
+        .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .where(TestAttempt.test_id == test_id)
+        .order_by(TestAttempt.score.desc(), TestAttempt.completed_at.asc(), User.id.asc())
+    )
+    result = await session.execute(stmt)
+    rankings: list[dict] = []
+    for row in result.all():
+        rankings.append(
+            {
+                "user_id": row.id,
+                "telegram_id": row.telegram_id,
+                "first_name": row.first_name,
+                "last_name": row.last_name,
+                "test_score": int(row.score or 0),
             }
         )
     for index, item in enumerate(rankings, start=1):
@@ -563,7 +617,7 @@ async def finish_attempt_and_notify(session: AsyncSession, bot: Bot, attempt_id:
         return None
     if attempt.status != AttemptStatus.COMPLETED.value:
         attempt = await _finalize_attempt(session, attempt)
-    test_rankings = await get_test_rankings(session)
+    test_rankings = await get_rankings_for_single_test(session, attempt.test_id)
     user_test_rank = next((item for item in test_rankings if item["user_id"] == attempt.user_id), None)
     title, subtitle = _build_attempt_rankings_title(attempt.user.language)
     leader = test_rankings[0] if test_rankings else None
@@ -599,12 +653,15 @@ async def close_test_and_notify(session: AsyncSession, bot: Bot, test_id: int) -
 
     for attempt in refreshed.attempts:
         detailed_attempt = await get_attempt(session, attempt.id)
-        if detailed_attempt and detailed_attempt.status == AttemptStatus.COMPLETED.value:
-            review = build_attempt_review(detailed_attempt)
-            try:
-                await bot.send_message(detailed_attempt.user.telegram_id, review)
-            except Exception:
-                continue
+        if detailed_attempt is None:
+            continue
+        if detailed_attempt.status != AttemptStatus.COMPLETED.value:
+            detailed_attempt = await _finalize_attempt(session, detailed_attempt)
+        review = build_attempt_review(detailed_attempt)
+        try:
+            await bot.send_message(detailed_attempt.user.telegram_id, review)
+        except Exception:
+            continue
     return refreshed
 
 

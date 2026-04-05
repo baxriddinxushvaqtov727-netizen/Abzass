@@ -31,7 +31,6 @@ from app.bot.keyboards import (
     admin_ticket_actions,
     admin_test_builder_keyboard,
     admin_tests_keyboard,
-    classes_keyboard,
     main_menu_keyboard,
     phone_keyboard,
     referral_share_keyboard,
@@ -61,6 +60,7 @@ from app.services.tests import (
     get_all_tests,
     get_or_create_attempt,
     get_referral_rankings,
+    get_rankings_for_single_test,
     get_test_by_id,
     get_test_rankings,
     get_total_test_score,
@@ -79,9 +79,18 @@ async def start_profile_registration(message: Message, state: FSMContext) -> Non
     await message.answer("Ro'yxatdan o'tishni boshlaymiz.\nIsmingizni yuboring.", reply_markup=ReplyKeyboardRemove())
 
 
-async def ensure_user_ready(message: Message, bot: Bot, state: FSMContext | None = None) -> bool:
+async def ensure_user_ready(
+    message: Message,
+    bot: Bot,
+    state: FSMContext | None = None,
+    telegram_user_id: int | None = None,
+) -> bool:
+    actor_id = telegram_user_id or (message.from_user.id if message.from_user else None)
+    if actor_id is None:
+        await message.answer("Avval /start buyrug'ini bosing.")
+        return False
     async with AsyncSessionLocal() as session:
-        user = await get_user_by_telegram_id(session, message.from_user.id)
+        user = await get_user_by_telegram_id(session, actor_id)
         if user is None:
             await message.answer("Avval /start buyrug'ini bosing.")
             return False
@@ -106,6 +115,16 @@ async def ensure_user_ready(message: Message, bot: Bot, state: FSMContext | None
                 await message.answer(t(language, "profile_prompt"))
             return False
     return True
+
+
+async def get_test_by_reference(session, value: str) -> Test | None:
+    raw_value = value.strip()
+    if raw_value.isdigit():
+        test = await get_test_by_id(session, int(raw_value))
+        if test is not None:
+            return test
+    code_stmt = select(Test).options(selectinload(Test.questions)).where(Test.test_code == raw_value.upper())
+    return await session.scalar(code_stmt)
 
 
 async def send_attachment(message: Message, path: str) -> None:
@@ -239,14 +258,14 @@ def format_results_message(
     lines = [
         f"<b>📊 {escape(t(language, 'results_title'))}</b>",
         f"📝 {t(language, 'results_test_score', score=test_score)}",
-        f"🏅 Test o'rni: {my_test_rank['rank'] if my_test_rank else '-'}",
+        f"🏅 {t(language, 'results_test_rank', rank=my_test_rank['rank'] if my_test_rank else '-')}",
         f"🤝 {t(language, 'results_referral_score', score=referral_score)}",
-        f"🌟 Referral o'rni: {my_referral_rank['rank'] if my_referral_rank else '-'}",
+        f"🌟 {t(language, 'results_referral_rank', rank=my_referral_rank['rank'] if my_referral_rank else '-')}",
     ]
     if test_leader:
-        lines.append(f"🥇 Test lideri: {escape(test_leader['display_name'])} - {test_leader['test_score']} ball")
+        lines.append(f"🥇 {t(language, 'results_test_leader', name=escape(test_leader['display_name']), score=test_leader['test_score'])}")
     if referral_leader:
-        lines.append(f"🏆 Referral lideri: {escape(referral_leader['display_name'])} - {referral_leader['referral_score']} ball")
+        lines.append(f"🏆 {t(language, 'results_referral_leader', name=escape(referral_leader['display_name']), score=referral_leader['referral_score'])}")
     if not my_test_rank and not my_referral_rank:
         lines.append(t(language, "results_unranked"))
     return "\n".join(lines)
@@ -269,13 +288,12 @@ def format_cabinet_message(
         f"👨‍👦 {t(language, 'cabinet_patronymic', value=escape(profile.patronymic))}",
         f"📍 {t(language, 'cabinet_region', value=escape(profile.region))}",
         f"🏘 {t(language, 'cabinet_district', value=escape(profile.district))}",
-        f"🎓 {t(language, 'cabinet_class', value=profile.school_class)}",
         f"📱 {t(language, 'cabinet_phone', value=escape(user.phone_number or '-'))}",
         f"🤝 {t(language, 'cabinet_invited', count=user.invited_users_count)}",
         f"📝 {t(language, 'results_test_score', score=test_score)}",
-        f"🏅 Test o'rni: {my_test_rank['rank'] if my_test_rank else '-'}",
+        f"🏅 {t(language, 'results_test_rank', rank=my_test_rank['rank'] if my_test_rank else '-')}",
         f"🌟 {t(language, 'results_referral_score', score=user.referral_score)}",
-        f"🏆 Referral o'rni: {my_referral_rank['rank'] if my_referral_rank else '-'}",
+        f"🏆 {t(language, 'results_referral_rank', rank=my_referral_rank['rank'] if my_referral_rank else '-')}",
         "",
         f"<b>📚 {escape(t(language, 'cabinet_history_title'))}</b>",
     ]
@@ -286,6 +304,66 @@ def format_cabinet_message(
     else:
         lines.append(t(language, "cabinet_history_empty"))
     return "\n".join(lines)
+
+
+def _chunk_text_blocks(header: str, lines: list[str], limit: int = 3500) -> list[str]:
+    if not lines:
+        return [header]
+    chunks: list[str] = []
+    current = header
+    for line in lines:
+        candidate = f"{current}\n{line}"
+        if len(candidate) > limit and current != header:
+            chunks.append(current)
+            current = f"{header}\n{line}"
+        elif len(candidate) > limit:
+            chunks.append(candidate[:limit])
+            current = header
+        else:
+            current = candidate
+    if current.strip():
+        chunks.append(current)
+    return chunks
+
+
+def build_referral_leaderboard_messages(language: str, rankings: list[dict]) -> list[str]:
+    header = f"<b>🏆 {escape(t(language, 'leaderboard_title'))}</b>\n<b>🤝 {escape(t(language, 'leaderboard_referral_title'))}</b>"
+    if not rankings:
+        return [f"{header}\n{t(language, 'leaderboard_empty')}"]
+    lines = [
+        t(
+            language,
+            "leaderboard_referral_line",
+            rank=item["rank"],
+            name=escape(item["display_name"]),
+            score=item["referral_score"],
+            count=item["invited_users_count"],
+        )
+        for item in rankings
+    ]
+    return _chunk_text_blocks(header, lines)
+
+
+def build_test_leaderboard_messages(language: str, *, test, rankings: list[dict]) -> list[str]:
+    header = (
+        f"<b>🧪 {escape(test.title)}</b>\n"
+        f"🆔 {escape(test.test_code)}\n"
+        f"<b>📋 {escape(t(language, 'leaderboard_tests_title'))}</b>"
+    )
+    if not rankings:
+        return [f"{header}\n{t(language, 'leaderboard_no_test_results')}"]
+    lines = [
+        t(
+            language,
+            "leaderboard_test_line",
+            rank=item["rank"],
+            name=escape(item["display_name"]),
+            score=item["test_score"],
+            total=len(test.questions),
+        )
+        for item in rankings
+    ]
+    return _chunk_text_blocks(header, lines)
 
 
 @router.message(Command("start"))
@@ -432,21 +510,11 @@ async def registration_district_handler(message: Message, state: FSMContext) -> 
     if not message.from_user or not message.text:
         return
     await state.update_data(district=message.text.strip())
-    await state.set_state(RegistrationStates.waiting_for_school_class)
-    await message.answer("Sinfni tanlang.", reply_markup=classes_keyboard())
-
-
-@router.callback_query(RegistrationStates.waiting_for_school_class, F.data.startswith("reg_class:"))
-async def registration_class_callback(callback: CallbackQuery, state: FSMContext) -> None:
-    if not callback.from_user or not callback.message:
-        return
-    school_class = int(callback.data.split(":", 1)[1])
     data = await state.get_data()
     async with AsyncSessionLocal() as session:
-        user = await get_user_by_telegram_id(session, callback.from_user.id)
+        user = await get_user_by_telegram_id(session, message.from_user.id)
         if user is None:
-            await callback.message.answer("Avval /start yuboring.")
-            await callback.answer()
+            await message.answer("Avval /start yuboring.")
             return
         await complete_profile(
             session,
@@ -456,11 +524,9 @@ async def registration_class_callback(callback: CallbackQuery, state: FSMContext
             patronymic=data["patronymic"],
             region=data["region"],
             district=data["district"],
-            school_class=school_class,
         )
     await state.clear()
-    await callback.message.answer("Ro'yxatdan o'tish yakunlandi.", reply_markup=main_menu_keyboard(user.language))
-    await callback.answer()
+    await message.answer("Ro'yxatdan o'tish yakunlandi.", reply_markup=main_menu_keyboard(user.language))
 
 
 @router.message(Command("admin"))
@@ -512,10 +578,10 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await callback.message.answer("🧪 Test nomini yuboring.")
         elif action == "close_test":
             await state.set_state(AdminStates.waiting_for_test_close)
-            await callback.message.answer(f"{format_tests(await get_all_tests(session))}\n\nYopish uchun test ID yuboring.")
+            await callback.message.answer(f"{format_tests(await get_all_tests(session))}\n\nYopish uchun test ID yoki test code yuboring.")
         elif action == "delete_test":
             await state.set_state(AdminStates.waiting_for_test_delete)
-            await callback.message.answer(f"{format_tests(await get_all_tests(session))}\n\nO'chirish uchun test ID yuboring.")
+            await callback.message.answer(f"{format_tests(await get_all_tests(session))}\n\nO'chirish uchun test ID yoki test code yuboring.")
         elif action == "content":
             await safe_edit_text(callback.message, "Nizom va kitoblar boshqaruvi:", reply_markup=admin_content_keyboard())
         elif action == "add_rule":
@@ -665,13 +731,16 @@ async def admin_referral_content_handler(message: Message, state: FSMContext, bo
     if raw_text.lower() in {"yo'q", "yoq", "none", "no", "-"}:
         text = None
         media_path = None
+        replace_media = True
     else:
         text = raw_text or None
         media_path = None
+        replace_media = False
         if message.photo:
             media_path = await save_bot_file(bot, message.photo[-1].file_id, "referral", ".jpg")
+            replace_media = True
     async with AsyncSessionLocal() as session:
-        await set_referral_share_content(session, text=text, media_path=media_path)
+        await set_referral_share_content(session, text=text, media_path=media_path, replace_media=replace_media)
     await state.clear()
     if text or media_path:
         await message.answer("✅ Referral izohi saqlandi.", reply_markup=admin_panel_keyboard())
@@ -799,13 +868,12 @@ async def admin_test_question_text_handler(message: Message, state: FSMContext) 
 async def admin_test_close_handler(message: Message, state: FSMContext, bot: Bot) -> None:
     if not message.from_user or not message.text or not is_admin(message.from_user.id):
         return
-    try:
-        test_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("Test ID son bo'lishi kerak.")
-        return
     async with AsyncSessionLocal() as session:
-        test = await close_test_and_notify(session, bot, test_id)
+        target = await get_test_by_reference(session, message.text)
+        if target is None:
+            await message.answer("Test topilmadi.")
+            return
+        test = await close_test_and_notify(session, bot, target.id)
     if test is None:
         await message.answer("Test topilmadi.")
         return
@@ -817,13 +885,8 @@ async def admin_test_close_handler(message: Message, state: FSMContext, bot: Bot
 async def admin_test_delete_handler(message: Message, state: FSMContext) -> None:
     if not message.from_user or not message.text or not is_admin(message.from_user.id):
         return
-    try:
-        test_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("Test ID son bo'lishi kerak.")
-        return
     async with AsyncSessionLocal() as session:
-        test = await session.get(Test, test_id)
+        test = await get_test_by_reference(session, message.text)
         if test is None:
             await message.answer("Test topilmadi.")
             return
@@ -939,8 +1002,7 @@ async def admin_broadcast_schedule_handler(message: Message, state: FSMContext) 
 async def quiz_start_callback(callback: CallbackQuery, bot: Bot, state: FSMContext) -> None:
     if not callback.from_user or not callback.message:
         return
-    fake_message = callback.message
-    ready = await ensure_user_ready(fake_message, bot, state)
+    ready = await ensure_user_ready(callback.message, bot, state, telegram_user_id=callback.from_user.id)
     if not ready:
         await callback.answer()
         return
@@ -1081,6 +1143,21 @@ async def menu_handler(message: Message, state: FSMContext, bot: Bot) -> None:
                 ),
                 reply_markup=main_menu_keyboard(user.language),
             )
+            return
+        if menu_key == "leaderboard":
+            referral_rankings = await get_referral_rankings(session)
+            tests = await get_all_tests(session)
+            first_message = True
+            for chunk in build_referral_leaderboard_messages(user.language, referral_rankings):
+                await message.answer(
+                    chunk,
+                    reply_markup=main_menu_keyboard(user.language) if first_message else None,
+                )
+                first_message = False
+            for test in tests:
+                test_rankings = await get_rankings_for_single_test(session, test.id)
+                for chunk in build_test_leaderboard_messages(user.language, test=test, rankings=test_rankings):
+                    await message.answer(chunk)
             return
         if menu_key == "cabinet":
             test_rankings = await get_test_rankings(session)
