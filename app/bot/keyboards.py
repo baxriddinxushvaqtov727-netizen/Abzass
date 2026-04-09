@@ -92,7 +92,10 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Nizom/Kitob", callback_data="admin:content"),
                 InlineKeyboardButton(text="Broadcast", callback_data="admin:broadcast"),
             ],
-            [InlineKeyboardButton(text="Referral izohi", callback_data="admin:referral_text")],
+            [
+                InlineKeyboardButton(text="Referral izohi", callback_data="admin:referral_text"),
+                InlineKeyboardButton(text="📈 Statistika", callback_data="admin:stats"),
+            ],
             [InlineKeyboardButton(text="Yangilash", callback_data="admin:home")],
         ]
     )

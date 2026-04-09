@@ -19,7 +19,7 @@ from aiogram.types import (
     PhotoSize,
     ReplyKeyboardRemove,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.bot.keyboards import (
@@ -43,7 +43,7 @@ from app.bot.states import AdminStates, RegistrationStates, SupportStates
 from app.core.config import get_settings
 from app.core.i18n import resolve_menu_key, t
 from app.db.session import AsyncSessionLocal
-from app.models import ContestBook, ContestRule, RequiredChannel, Test, TestAttempt
+from app.models import ContestBook, ContestRule, RequiredChannel, Test, TestAttempt, User
 from app.services.broadcasts import create_scheduled_broadcast, get_all_broadcasts, run_broadcast_now
 from app.services.content import get_active_books, get_active_rules, get_all_books, get_all_rules
 from app.services.storage import save_bot_file
@@ -213,6 +213,37 @@ def format_broadcasts(items: list) -> str:
         status = "yuborildi" if item.is_sent else "kutilmoqda"
         lines.append(f"{item.id}. {item.scheduled_at.strftime('%Y-%m-%d %H:%M')} | {status}")
     return "\n".join(lines)
+
+
+async def format_admin_stats(session) -> str:
+    total_users = int(await session.scalar(select(func.count()).select_from(User)) or 0)
+    completed_users = int(
+        await session.scalar(
+            select(func.count()).select_from(User).where(User.is_profile_completed.is_(True))
+        )
+        or 0
+    )
+    users_with_phone = int(
+        await session.scalar(
+            select(func.count()).select_from(User).where(User.phone_number.is_not(None))
+        )
+        or 0
+    )
+    referral_users = int(
+        await session.scalar(
+            select(func.count()).select_from(User).where(User.invited_users_count > 0)
+        )
+        or 0
+    )
+    return "\n".join(
+        [
+            "📈 Bot statistikasi",
+            f"👥 Jami foydalanuvchilar: {total_users}",
+            f"✅ To'liq ro'yxatdan o'tganlar: {completed_users}",
+            f"📱 Telefon yuborganlar: {users_with_phone}",
+            f"🤝 Referral qilganlar: {referral_users}",
+        ]
+    )
 
 
 def parse_test_options(value: str) -> list[str]:
@@ -645,6 +676,8 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await callback.message.answer(f"{format_content(await get_all_books(session), 'Kitoblar')}\n\nO'chirish uchun ID yuboring.")
         elif action == "broadcast":
             await safe_edit_text(callback.message, "Broadcast boshqaruvi:", reply_markup=admin_broadcast_keyboard())
+        elif action == "stats":
+            await safe_edit_text(callback.message, await format_admin_stats(session), reply_markup=admin_panel_keyboard())
         elif action == "referral_text":
             current_text = await get_referral_share_text(session)
             await state.set_state(AdminStates.waiting_for_referral_content)
