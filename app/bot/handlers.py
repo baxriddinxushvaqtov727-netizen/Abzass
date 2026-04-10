@@ -19,7 +19,7 @@ from aiogram.types import (
     PhotoSize,
     ReplyKeyboardRemove,
 )
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from app.bot.keyboards import (
@@ -28,6 +28,7 @@ from app.bot.keyboards import (
     admin_content_keyboard,
     admin_panel_keyboard,
     admin_quiz_poll_keyboard,
+    admin_referral_reset_keyboard,
     admin_ticket_actions,
     admin_test_builder_keyboard,
     admin_tests_keyboard,
@@ -678,6 +679,26 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext) -> 
             await safe_edit_text(callback.message, "Broadcast boshqaruvi:", reply_markup=admin_broadcast_keyboard())
         elif action == "stats":
             await safe_edit_text(callback.message, await format_admin_stats(session), reply_markup=admin_panel_keyboard())
+        elif action == "reset_referrals":
+            await safe_edit_text(
+                callback.message,
+                "⚠️ Barcha foydalanuvchilarning referral ballari va referral soni 0 qilinadi.\n"
+                "Bu amal qaytarilmaydi.\n\nTasdiqlaysizmi?",
+                reply_markup=admin_referral_reset_keyboard(),
+            )
+        elif action == "confirm_reset_referrals":
+            await session.execute(
+                update(User).values(
+                    referral_score=0,
+                    invited_users_count=0,
+                )
+            )
+            await session.commit()
+            await safe_edit_text(
+                callback.message,
+                "✅ Barcha referral ballari va referral soni 0 qilindi.",
+                reply_markup=admin_panel_keyboard(),
+            )
         elif action == "referral_text":
             current_text = await get_referral_share_text(session)
             await state.set_state(AdminStates.waiting_for_referral_content)

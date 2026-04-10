@@ -96,7 +96,19 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Referral izohi", callback_data="admin:referral_text"),
                 InlineKeyboardButton(text="📈 Statistika", callback_data="admin:stats"),
             ],
+            [InlineKeyboardButton(text="🧹 Referralni tozalash", callback_data="admin:reset_referrals")],
             [InlineKeyboardButton(text="Yangilash", callback_data="admin:home")],
+        ]
+    )
+
+
+def admin_referral_reset_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Ha, tozalash", callback_data="admin:confirm_reset_referrals"),
+                InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin:home"),
+            ]
         ]
     )
 
